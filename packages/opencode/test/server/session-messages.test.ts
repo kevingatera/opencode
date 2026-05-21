@@ -127,6 +127,59 @@ describe("session messages endpoint", () => {
   )
 
   it.instance(
+    "omits malformed textual tool markup from assistant history responses",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const sessionInfo = yield* sessionScoped
+        const session = yield* SessionNs.Service
+        const userID = MessageID.ascending()
+        const assistantID = MessageID.ascending()
+
+        yield* session.updateMessage({
+          id: userID,
+          sessionID: sessionInfo.id,
+          role: "user",
+          time: { created: Date.now() },
+          agent: "test",
+          model,
+          tools: {},
+        } satisfies SessionV1.User)
+        yield* session.updateMessage({
+          id: assistantID,
+          sessionID: sessionInfo.id,
+          role: "assistant",
+          parentID: userID,
+          time: { created: Date.now() },
+          agent: "build",
+          mode: "build",
+          providerID: ProviderV2.ID.make("opencode-go"),
+          modelID: ModelV2.ID.make("minimax-m3"),
+          path: { cwd: "/tmp", root: "/tmp" },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        } satisfies SessionV1.Assistant)
+        yield* session.updatePart({
+          id: PartID.ascending(),
+          sessionID: sessionInfo.id,
+          messageID: assistantID,
+          type: "text",
+          text: "Let me check the current state and fix the issue.Tool result 3 todos:\n[]\n<function_calls>",
+        } satisfies SessionV1.TextPart)
+
+        const res = yield* request(`/session/${sessionInfo.id}/message`)
+        expect(res.status).toBe(200)
+        const body = yield* json<SessionV1.WithParts[]>(res)
+        const text = body.flatMap((item) => item.parts).find((part) => part.type === "text")
+
+        expect(text?.type).toBe("text")
+        if (!text || text.type !== "text") throw new Error("Expected text part")
+        expect(text.text).toBe("Let me check the current state and fix the issue.")
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "rejects invalid cursors and missing sessions",
     withoutWatcher(
       Effect.gen(function* () {

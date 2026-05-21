@@ -35,6 +35,8 @@ export const ListQuery = Schema.Struct({
   start: Schema.optional(Schema.NumberFromString),
   search: Schema.optional(Schema.String),
   limit: Schema.optional(Schema.NumberFromString),
+  order: Schema.optional(Schema.Union([Schema.Literal("asc"), Schema.Literal("desc")])),
+  cursor: Schema.optional(Schema.String),
 })
 export const DiffQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
@@ -43,6 +45,7 @@ export const DiffQuery = Schema.Struct({
 export const MessagesQuery = Schema.Struct({
   ...WorkspaceRoutingQueryFields,
   limit: Schema.optional(Schema.NumberFromString.check(Schema.isInt(), Schema.isGreaterThanOrEqualTo(0))),
+  order: Schema.optional(Schema.Union([Schema.Literal("asc"), Schema.Literal("desc")])),
   before: Schema.optional(Schema.String),
 })
 export const StatusMap = Schema.Record(Schema.String, SessionStatus.Info)
@@ -111,6 +114,7 @@ export const SessionApi = HttpApi.make("session")
         HttpApiEndpoint.get("list", SessionPaths.list, {
           query: ListQuery,
           success: described(Schema.Array(Session.Info), "List of sessions"),
+          error: HttpApiError.BadRequest,
         }).annotateMerge(
           OpenApi.annotations({
             identifier: "session.list",

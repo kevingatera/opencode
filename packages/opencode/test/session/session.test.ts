@@ -238,6 +238,59 @@ describe("Session", () => {
     }),
   )
 
+  it.instance("sanitizes malformed assistant text when copying fork history", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const created = yield* Effect.acquireRelease(session.create({ title: "bad-history" }), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+      const userID = MessageID.ascending()
+      const assistantID = MessageID.ascending()
+
+      yield* session.updateMessage({
+        id: userID,
+        sessionID: created.id,
+        role: "user",
+        time: { created: Date.now() },
+        agent: "user",
+        model: { providerID: "test", modelID: "test" },
+        tools: {},
+        mode: "",
+      } as unknown as SessionV1.Info)
+      yield* session.updateMessage({
+        id: assistantID,
+        sessionID: created.id,
+        role: "assistant",
+        parentID: userID,
+        time: { created: Date.now() },
+        agent: "build",
+        modelID: "minimax-m3",
+        providerID: "opencode-go",
+        mode: "build",
+        cost: 0,
+        path: { cwd: "/tmp", root: "/tmp" },
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      } as SessionV1.Assistant)
+      yield* session.updatePart({
+        id: PartID.ascending(),
+        messageID: assistantID,
+        sessionID: created.id,
+        type: "text",
+        text: "Let me check the current state and fix the issue.Tool result 3 todos:\n[]",
+      })
+
+      const fork = yield* Effect.acquireRelease(session.fork({ sessionID: created.id }), (info) =>
+        session.remove(info.id).pipe(Effect.ignore),
+      )
+      const forked = yield* session.messages({ sessionID: fork.id })
+      const text = forked.flatMap((message) => message.parts).find((part) => part.type === "text")
+
+      expect(text?.type).toBe("text")
+      if (!text || text.type !== "text") throw new Error("Expected forked text part")
+      expect(text.text).toBe("Let me check the current state and fix the issue.")
+    }),
+  )
+
   it.instance("omits metadata when not provided", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service

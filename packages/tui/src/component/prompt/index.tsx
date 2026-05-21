@@ -103,6 +103,22 @@ const money = new Intl.NumberFormat("en-US", {
 
 const DRAFT_RETENTION_MIN_CHARS = 20
 
+function parseSlashInput(text: string) {
+  if (!text.startsWith("/")) return
+  const firstLineEnd = text.indexOf("\n")
+  const firstLine = firstLineEnd === -1 ? text : text.slice(0, firstLineEnd)
+  const match = firstLine.match(/^\/(\S+)(?:\s(.*))?$/)
+  if (!match) return
+  const name = match[1]
+  if (!name) return
+  const restOfInput = firstLineEnd === -1 ? "" : text.slice(firstLineEnd + 1)
+  const firstLineArgs = match[2] ?? ""
+  return {
+    name,
+    args: firstLineArgs + (restOfInput ? "\n" + restOfInput : ""),
+  }
+}
+
 function randomIndex(count: number) {
   if (count <= 0) return 0
   return Math.floor(Math.random() * count)
@@ -231,7 +247,9 @@ export function Prompt(props: PromptProps) {
   const fileStyleId = syntax().getStyleId("extmark.file")!
   const agentStyleId = syntax().getStyleId("extmark.agent")!
   const pasteStyleId = syntax().getStyleId("extmark.paste")!
+  const slashCommandStyleId = syntax().getStyleId("extmark.command")!
   let promptPartTypeId = 0
+  let slashCommandTypeId = 0
   const event = useEvent()
 
   event.on("tui.prompt.append", (evt, { workspace }) => {
@@ -696,6 +714,7 @@ export function Prompt(props: PromptProps) {
         })
       }
     })
+    syncSlashCommandExtmark(input.plainText)
   }
 
   function syncExtmarksWithPromptParts() {
@@ -730,6 +749,44 @@ export function Prompt(props: PromptProps) {
         draft.prompt.parts = newParts
       }),
     )
+  }
+
+  function findPaletteSlashCommand(slashName: string) {
+    return keymap
+      .getCommandEntries({
+        visibility: "reachable",
+        namespace: "palette",
+      })
+      .find((entry) => {
+        if (entry.command.slashName === slashName) return true
+        const aliases = entry.command.slashAliases
+        return Array.isArray(aliases) && aliases.includes(slashName)
+      })
+  }
+
+  function slashCommandHeadEnd(text: string) {
+    const slashInput = parseSlashInput(text)
+    if (!slashInput) return
+    if (findPaletteSlashCommand(slashInput.name)) return slashInput.name.length + 1
+    if (sync.data.command.some((command) => command.name === slashInput.name)) return slashInput.name.length + 1
+  }
+
+  function syncSlashCommandExtmark(text: string) {
+    if (!input || input.isDestroyed || slashCommandTypeId === 0) return
+
+    input.extmarks.getAllForTypeId(slashCommandTypeId).forEach((extmark) => {
+      input.extmarks.delete(extmark.id)
+    })
+
+    const end = slashCommandHeadEnd(text)
+    if (!end) return
+
+    input.extmarks.create({
+      start: 0,
+      end,
+      styleId: slashCommandStyleId,
+      typeId: slashCommandTypeId,
+    })
   }
 
   const stashCommands = createMemo(() =>
@@ -971,6 +1028,7 @@ export function Prompt(props: PromptProps) {
     }
 
     const workspaceSession = props.sessionID ? sync.session.get(props.sessionID) : undefined
+    const promptAgentName = workspaceSession?.parentID && workspaceSession.agent ? workspaceSession.agent : agent.name
     const workspaceID = workspaceSession?.workspaceID
     const workspaceStatus = workspaceID ? (project.workspace.status(workspaceID) ?? "error") : undefined
     if (props.sessionID && workspaceID && workspaceStatus !== "connected") {
@@ -1055,11 +1113,14 @@ export function Prompt(props: PromptProps) {
           ]
         : []
 
+    const slashInput = parseSlashInput(inputText)
+    const slashCommand = slashInput ? findPaletteSlashCommand(slashInput.name) : undefined
+
     if (store.mode === "shell") {
       move.startSubmit()
       void sdk.client.session.shell({
         sessionID,
-        agent: agent.name,
+        agent: promptAgentName,
         model: {
           providerID: selectedModel.providerID,
           modelID: selectedModel.modelID,
@@ -1067,6 +1128,14 @@ export function Prompt(props: PromptProps) {
         command: inputText,
       })
       setStore("mode", "normal")
+    } else if (slashInput && slashCommand) {
+      move.startSubmit()
+      keymap.dispatchCommand(slashCommand.command.name, {
+        payload: {
+          args: slashInput.args,
+          slashName: slashInput.name,
+        },
+      })
     } else if (
       inputText.startsWith("/") &&
       sync.data.command.some((x) => x.name === inputText.split("\n")[0].split(" ")[0].slice(1))
@@ -1083,7 +1152,7 @@ export function Prompt(props: PromptProps) {
         sessionID,
         command: command.slice(1),
         arguments: args,
-        agent: agent.name,
+        agent: promptAgentName,
         model: `${selectedModel.providerID}/${selectedModel.modelID}`,
         variant,
         parts: nonTextParts.filter((x) => x.type === "file"),
@@ -1095,7 +1164,7 @@ export function Prompt(props: PromptProps) {
           {
             sessionID,
             ...selectedModel,
-            agent: agent.name,
+            agent: promptAgentName,
             model: selectedModel,
             variant,
             parts: [
@@ -1378,6 +1447,7 @@ export function Prompt(props: PromptProps) {
                 setStore("prompt", "input", value)
                 auto()?.onInput(value)
                 syncExtmarksWithPromptParts()
+                syncSlashCommandExtmark(value)
                 setCursorVersion((value) => value + 1)
               }}
               onCursorChange={() => setCursorVersion((value) => value + 1)}
@@ -1425,6 +1495,9 @@ export function Prompt(props: PromptProps) {
                 setInputTarget(r)
                 if (promptPartTypeId === 0) {
                   promptPartTypeId = input.extmarks.registerType("prompt-part")
+                }
+                if (slashCommandTypeId === 0) {
+                  slashCommandTypeId = input.extmarks.registerType("slash-command")
                 }
                 props.ref?.(ref)
                 setTimeout(() => {
