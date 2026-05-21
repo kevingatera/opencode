@@ -8,6 +8,9 @@ import { MessageID, PartID, type SessionID } from "../../src/session/schema"
 import * as Log from "@opencode-ai/core/util/log"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
+import { Database } from "@/storage/db"
+import { SessionTable } from "@/session/session.sql"
+import { eq } from "drizzle-orm"
 
 void Log.init({ print: false })
 
@@ -75,8 +78,8 @@ const fill = Effect.fn("SessionMessagesTest.fill")(function* (
   )
 })
 
-function request(path: string) {
-  return Effect.promise(() => Promise.resolve(Server.Default().app.request(path)))
+function request(path: string, init?: RequestInit) {
+  return Effect.promise(() => Promise.resolve(Server.Default().app.request(path, init)))
 }
 
 function json<T>(response: Response) {
@@ -84,6 +87,70 @@ function json<T>(response: Response) {
 }
 
 describe("session messages endpoint", () => {
+  it.instance(
+    "returns cursor headers for older session pages",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory }
+        const newer = yield* sessionScoped
+        const middle = yield* sessionScoped
+        const older = yield* sessionScoped
+
+        yield* Effect.sync(() => {
+          Database.use((db) => {
+            db.update(SessionTable).set({ time_updated: 3000 }).where(eq(SessionTable.id, newer.id)).run()
+            db.update(SessionTable).set({ time_updated: 2000 }).where(eq(SessionTable.id, middle.id)).run()
+            db.update(SessionTable).set({ time_updated: 1000 }).where(eq(SessionTable.id, older.id)).run()
+          })
+        })
+
+        const a = yield* request("/session?limit=2", { headers })
+        expect(a.status).toBe(200)
+        const aBody = yield* json<SessionNs.Info[]>(a)
+        expect(aBody.map((item) => item.id)).toEqual([newer.id, middle.id])
+        const cursor = a.headers.get("x-next-cursor")
+        expect(cursor).toBeTruthy()
+        expect(a.headers.get("link")).toContain('rel="next"')
+        expect(a.headers.get("access-control-expose-headers")?.toLowerCase()).toContain("x-next-cursor")
+
+        const b = yield* request(`/session?limit=2&cursor=${encodeURIComponent(cursor!)}`, { headers })
+        expect(b.status).toBe(200)
+        const bBody = yield* json<SessionNs.Info[]>(b)
+        expect(bBody.map((item) => item.id)).toEqual([older.id])
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
+    "returns oldest session pages directly",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const headers = { "x-opencode-directory": test.directory }
+        const newer = yield* sessionScoped
+        const middle = yield* sessionScoped
+        const older = yield* sessionScoped
+
+        yield* Effect.sync(() => {
+          Database.use((db) => {
+            db.update(SessionTable).set({ time_updated: 3000 }).where(eq(SessionTable.id, newer.id)).run()
+            db.update(SessionTable).set({ time_updated: 2000 }).where(eq(SessionTable.id, middle.id)).run()
+            db.update(SessionTable).set({ time_updated: 1000 }).where(eq(SessionTable.id, older.id)).run()
+          })
+        })
+
+        const response = yield* request("/session?limit=2&order=asc", { headers })
+
+        expect(response.status).toBe(200)
+        const body = yield* json<SessionNs.Info[]>(response)
+        expect(body.map((item) => item.id)).toEqual([older.id, middle.id])
+      }),
+    ),
+    { git: true },
+  )
+
   it.instance(
     "returns cursor headers for older pages",
     withoutWatcher(

@@ -43,6 +43,29 @@ const tryParseJson = (text: string) =>
     catch: () => new HttpApiError.BadRequest({}),
   })
 
+const sessionListCursor = {
+  encode(session: Session.Info) {
+    return Buffer.from(JSON.stringify({ id: session.id, time: session.time.updated })).toString("base64url")
+  },
+  decode(value: string) {
+    return Effect.try({
+      try: () => {
+        const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+          id?: unknown
+          time?: unknown
+        }
+        if (typeof parsed.id !== "string") throw new Error("invalid cursor id")
+        if (typeof parsed.time !== "number" || !Number.isFinite(parsed.time)) throw new Error("invalid cursor time")
+        return {
+          id: SessionID.make(parsed.id),
+          time: parsed.time,
+        }
+      },
+      catch: () => new HttpApiError.BadRequest({}),
+    })
+  },
+}
+
 export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -60,14 +83,37 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const scope = yield* Scope.Scope
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
-      return yield* session.list({
+      const limit = ctx.query.limit
+      const cursor = ctx.query.cursor ? yield* sessionListCursor.decode(ctx.query.cursor) : undefined
+      const sessions = yield* session.list({
         directory: ctx.query.scope === "project" ? undefined : ctx.query.directory,
         scope: ctx.query.scope,
         path: ctx.query.path,
         roots: ctx.query.roots,
         start: ctx.query.start,
         search: ctx.query.search,
-        limit: ctx.query.limit,
+        limit: limit === undefined ? undefined : limit + 1,
+        order: ctx.query.order,
+        cursor,
+      })
+      if (limit === undefined || sessions.length <= limit) return sessions
+
+      const items = sessions.slice(0, limit)
+      const next = items.at(-1)
+      if (!next) return items
+
+      const request = yield* HttpServerRequest.HttpServerRequest
+      // Keep pagination compatible with the legacy array response by exposing
+      // the next page cursor in headers, matching session message history.
+      const url = Option.getOrElse(HttpServerRequest.toURL(request), () => new URL(request.url, "http://localhost"))
+      url.searchParams.set("limit", limit.toString())
+      url.searchParams.set("cursor", sessionListCursor.encode(next))
+      return HttpServerResponse.jsonUnsafe(items, {
+        headers: {
+          "Access-Control-Expose-Headers": "Link, X-Next-Cursor",
+          Link: `<${url.toString()}>; rel="next"`,
+          "X-Next-Cursor": sessionListCursor.encode(next),
+        },
       })
     })
 

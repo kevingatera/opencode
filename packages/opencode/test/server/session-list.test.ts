@@ -227,4 +227,90 @@ describe("session.list", () => {
       }),
     { git: true },
   )
+
+  it.instance(
+    "paginates after a cursor while preserving recency order",
+    () =>
+      Effect.gen(function* () {
+        const newer = yield* withSession({ title: "newer" })
+        const middle = yield* withSession({ title: "middle" })
+        const older = yield* withSession({ title: "older" })
+
+        yield* Effect.sync(() => {
+          Database.use((db) => {
+            db.update(SessionTable).set({ time_updated: 3000 }).where(eq(SessionTable.id, newer.id)).run()
+            db.update(SessionTable).set({ time_updated: 2000 }).where(eq(SessionTable.id, middle.id)).run()
+            db.update(SessionTable).set({ time_updated: 1000 }).where(eq(SessionTable.id, older.id)).run()
+          })
+        })
+
+        const first = yield* SessionNs.use.list({ limit: 2 })
+        const second = yield* SessionNs.use.list({
+          limit: 2,
+          cursor: {
+            id: first[1]!.id,
+            time: first[1]!.time.updated,
+          },
+        })
+
+        expect(first.map((session) => session.id)).toEqual([newer.id, middle.id])
+        expect(second.map((session) => session.id)).toEqual([older.id])
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "lists oldest sessions first when ordered ascending",
+    () =>
+      Effect.gen(function* () {
+        const newer = yield* withSession({ title: "newer" })
+        const middle = yield* withSession({ title: "middle" })
+        const older = yield* withSession({ title: "older" })
+
+        yield* Effect.sync(() => {
+          Database.use((db) => {
+            db.update(SessionTable).set({ time_updated: 3000 }).where(eq(SessionTable.id, newer.id)).run()
+            db.update(SessionTable).set({ time_updated: 2000 }).where(eq(SessionTable.id, middle.id)).run()
+            db.update(SessionTable).set({ time_updated: 1000 }).where(eq(SessionTable.id, older.id)).run()
+          })
+        })
+
+        const sessions = yield* SessionNs.use.list({ limit: 2, order: "asc" })
+
+        expect(sessions.map((session) => session.id)).toEqual([older.id, middle.id])
+      }),
+    { git: true },
+  )
+
+  it.instance(
+    "paginates ascending after a cursor while preserving oldest-to-newer order",
+    () =>
+      Effect.gen(function* () {
+        const newer = yield* withSession({ title: "newer" })
+        const middle = yield* withSession({ title: "middle" })
+        const older = yield* withSession({ title: "older" })
+
+        yield* Effect.sync(() => {
+          Database.use((db) => {
+            db.update(SessionTable).set({ time_updated: 3000 }).where(eq(SessionTable.id, newer.id)).run()
+            db.update(SessionTable).set({ time_updated: 2000 }).where(eq(SessionTable.id, middle.id)).run()
+            db.update(SessionTable).set({ time_updated: 1000 }).where(eq(SessionTable.id, older.id)).run()
+          })
+        })
+
+        const first = yield* SessionNs.use.list({ limit: 2, order: "asc" })
+        const second = yield* SessionNs.use.list({
+          limit: 2,
+          order: "asc",
+          cursor: {
+            id: first[1]!.id,
+            time: first[1]!.time.updated,
+          },
+        })
+
+        expect(first.map((session) => session.id)).toEqual([older.id, middle.id])
+        expect(second.map((session) => session.id)).toEqual([newer.id])
+      }),
+    { git: true },
+  )
 })

@@ -14,7 +14,9 @@ import { eq } from "drizzle-orm"
 import { and } from "drizzle-orm"
 import { gte } from "drizzle-orm"
 import { isNull } from "drizzle-orm"
+import { asc } from "drizzle-orm"
 import { desc } from "drizzle-orm"
+import { gt } from "drizzle-orm"
 import { like } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
@@ -286,6 +288,11 @@ export type ListInput = {
   start?: number
   search?: string
   limit?: number
+  order?: "asc" | "desc"
+  cursor?: {
+    id: SessionID
+    time: number
+  }
 }
 
 const CreatedEventSchema = Schema.Struct({
@@ -920,6 +927,20 @@ function* listByProject(
   if (input.start) {
     conditions.push(gte(SessionTable.time_updated, input.start))
   }
+  const order = input.order ?? "desc"
+  if (input.cursor) {
+    conditions.push(
+      order === "asc"
+        ? or(
+            gt(SessionTable.time_updated, input.cursor.time),
+            and(eq(SessionTable.time_updated, input.cursor.time), gt(SessionTable.id, input.cursor.id)),
+          )!
+        : or(
+            lt(SessionTable.time_updated, input.cursor.time),
+            and(eq(SessionTable.time_updated, input.cursor.time), lt(SessionTable.id, input.cursor.id)),
+          )!,
+    )
+  }
   if (input.search) {
     conditions.push(like(SessionTable.title, `%${input.search}%`))
   }
@@ -931,7 +952,10 @@ function* listByProject(
       .select()
       .from(SessionTable)
       .where(and(...conditions))
-      .orderBy(desc(SessionTable.time_updated))
+      .orderBy(
+        order === "asc" ? asc(SessionTable.time_updated) : desc(SessionTable.time_updated),
+        order === "asc" ? asc(SessionTable.id) : desc(SessionTable.id),
+      )
       .limit(limit)
       .all(),
   )
