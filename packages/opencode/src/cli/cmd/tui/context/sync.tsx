@@ -113,6 +113,17 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
     const kv = useKV()
 
     const fullSyncedSessions = new Set<string>()
+    const sessionListPageSize = 50
+    // Keep session bootstrap cheap. The session dialog can page older results
+    // without changing the core TUI store shape or losing path scoping.
+    const [sessionPage, setSessionPage] = createStore({
+      cursor: undefined as string | undefined,
+      loading: false,
+      complete: false,
+      oldestCursor: undefined as string | undefined,
+      oldestComplete: true,
+      oldestTop: undefined as string | undefined,
+    })
 
     function sessionListQuery(): { scope?: "project"; path?: string } {
       if (!kv.get("session_directory_filter_enabled", true)) return { scope: "project" }
@@ -124,10 +135,40 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       }
     }
 
-    function listSessions() {
-      return sdk.client.session
-        .list({ start: Date.now() - 30 * 24 * 60 * 60 * 1000, ...sessionListQuery() })
-        .then((x) => (x.data ?? []).toSorted((a, b) => a.id.localeCompare(b.id)))
+    function mergeSessions(current: Session[], incoming: Session[]) {
+      return [...new Map([...current, ...incoming].map((item) => [item.id, item])).values()].toSorted((a, b) =>
+        a.id.localeCompare(b.id),
+      )
+    }
+
+    async function loadSessionListPage(input?: { order?: "asc"; cursor?: string }) {
+      if (sessionPage.loading && (input?.order || input?.cursor)) return
+      setSessionPage("loading", true)
+      try {
+        const response = await sdk.client.session.list({
+          limit: sessionListPageSize,
+          order: input?.order,
+          cursor: input?.cursor,
+          ...sessionListQuery(),
+        })
+        return {
+          items: response.data ?? [],
+          cursor: response.response.headers.get("x-next-cursor") ?? undefined,
+        }
+      } finally {
+        setSessionPage("loading", false)
+      }
+    }
+
+    async function listSessions() {
+      const page = await loadSessionListPage()
+      const cursor = page?.cursor
+      setSessionPage("cursor", cursor)
+      setSessionPage("complete", !cursor)
+      setSessionPage("oldestCursor", undefined)
+      setSessionPage("oldestComplete", true)
+      setSessionPage("oldestTop", undefined)
+      return (page?.items ?? []).toSorted((a, b) => a.id.localeCompare(b.id))
     }
 
     event.subscribe((event, { workspace }) => {
@@ -507,6 +548,56 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         async refresh() {
           const list = await listSessions()
           setStore("session", reconcile(list))
+        },
+        page: {
+          more() {
+            return !sessionPage.complete && !!sessionPage.cursor
+          },
+          loading() {
+            return sessionPage.loading
+          },
+          cursor() {
+            return sessionPage.cursor
+          },
+          oldestMore() {
+            return !sessionPage.oldestComplete && !!sessionPage.oldestCursor
+          },
+          oldestTop() {
+            return sessionPage.oldestTop
+          },
+          async loadOldest() {
+            const page = await loadSessionListPage({ order: "asc" })
+            if (!page) return false
+            setSessionPage("oldestCursor", page.cursor)
+            setSessionPage("oldestComplete", !page.cursor)
+            setSessionPage("oldestTop", page.items.at(-1)?.id)
+            setStore("session", reconcile(mergeSessions(store.session, page.items)))
+            return page.items.length > 0
+          },
+          async loadFromOldest() {
+            if (sessionPage.oldestComplete) return false
+            const cursor = sessionPage.oldestCursor
+            if (!cursor) return false
+
+            const page = await loadSessionListPage({ order: "asc", cursor })
+            if (!page) return false
+            setSessionPage("oldestCursor", page.cursor)
+            setSessionPage("oldestComplete", !page.cursor)
+            setSessionPage("oldestTop", page.items.at(-1)?.id ?? sessionPage.oldestTop)
+            setStore("session", reconcile(mergeSessions(store.session, page.items)))
+            return page.items.length > 0
+          },
+          async loadMore() {
+            if (sessionPage.complete) return
+            const cursor = sessionPage.cursor
+            if (!cursor) return
+
+            const page = await loadSessionListPage({ cursor })
+            if (!page) return
+            setSessionPage("cursor", page.cursor)
+            setSessionPage("complete", !page.cursor)
+            setStore("session", reconcile(mergeSessions(store.session, page.items)))
+          },
         },
         status(sessionID: string) {
           const session = result.session.get(sessionID)

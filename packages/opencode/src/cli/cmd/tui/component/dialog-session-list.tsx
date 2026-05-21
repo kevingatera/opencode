@@ -1,8 +1,9 @@
 import { useDialog } from "@tui/ui/dialog"
-import { DialogSelect } from "@tui/ui/dialog-select"
+import { DialogSelect, type DialogSelectMoveEvent, type DialogSelectRef } from "@tui/ui/dialog-select"
 import { useRoute } from "@tui/context/route"
 import { useSync } from "@tui/context/sync"
-import { createMemo, createResource, createSignal, onMount, type JSX } from "solid-js"
+import { createEffect, createMemo, createSignal, on, onMount, type JSX } from "solid-js"
+import { createStore } from "solid-js/store"
 import { Locale } from "@/util/locale"
 import { useProject } from "@tui/context/project"
 import { useTheme } from "../context/theme"
@@ -18,6 +19,7 @@ import { errorMessage } from "@/util/error"
 import { DialogSessionDeleteFailed } from "./dialog-session-delete-failed"
 import { WorkspaceLabel } from "./workspace-label"
 import { useCommandShortcut } from "../keymap"
+import type { Session } from "@opencode-ai/sdk/v2"
 
 export function DialogSessionList() {
   const dialog = useDialog()
@@ -30,21 +32,117 @@ export function DialogSessionList() {
   const toast = useToast()
   const [toDelete, setToDelete] = createSignal<string>()
   const [search, setSearch] = createDebouncedSignal("", 150)
+  let selectRef: DialogSelectRef<string>
   const deleteHint = useCommandShortcut("session.delete")
   const quickSwitch1 = useCommandShortcut("session.quick_switch.1")
   const quickSwitch9 = useCommandShortcut("session.quick_switch.9")
-
-  const [searchResults, { refetch }] = createResource(
-    () => ({ query: search(), filter: sync.session.query() }),
-    async (input) => {
-      if (!input.query) return undefined
-      const result = await sdk.client.session.list({ search: input.query, limit: 30, ...input.filter })
-      return result.data ?? []
-    },
-  )
+  const searchPageSize = 50
+  const [searchPage, setSearchPage] = createStore({
+    results: undefined as Session[] | undefined,
+    cursor: undefined as string | undefined,
+    loading: false,
+    complete: true,
+    oldestCursor: undefined as string | undefined,
+    oldestComplete: true,
+    oldestTop: undefined as string | undefined,
+  })
+  const sessionFilter = createMemo(() => sync.session.query())
+  const sessionFilterKey = createMemo(() => JSON.stringify(sessionFilter()))
+  let searchRevision = 0
 
   const currentSessionID = createMemo(() => (route.data.type === "session" ? route.data.sessionID : undefined))
-  const sessions = createMemo(() => searchResults() ?? sync.data.session)
+  const sessions = createMemo(() => searchPage.results ?? sync.data.session)
+
+  function mergeSessions(current: Session[], incoming: Session[]) {
+    return [...new Map([...current, ...incoming].map((item) => [item.id, item])).values()]
+  }
+
+  async function loadSearchPage(reset: boolean) {
+    const query = search()
+    if (!query) {
+      searchRevision += 1
+      setSearchPage({
+        results: undefined,
+        cursor: undefined,
+        loading: false,
+        complete: true,
+        oldestCursor: undefined,
+        oldestComplete: true,
+        oldestTop: undefined,
+      })
+      return false
+    }
+    if (!reset && searchPage.loading) return false
+    if (!reset && searchPage.complete) return false
+    const cursor = reset ? undefined : searchPage.cursor
+    if (!reset && !cursor) return false
+
+    const revision = ++searchRevision
+    if (reset) {
+      setSearchPage({
+        results: [],
+        cursor: undefined,
+        complete: false,
+        oldestCursor: undefined,
+        oldestComplete: true,
+        oldestTop: undefined,
+      })
+    }
+    setSearchPage("loading", true)
+    try {
+      const response = await sdk.client.session.list({
+        search: query,
+        limit: searchPageSize,
+        cursor,
+        ...sessionFilter(),
+      })
+      if (revision !== searchRevision) return false
+      const next = response.data ?? []
+      const nextCursor = response.response.headers.get("x-next-cursor") ?? undefined
+      setSearchPage("results", reset ? next : mergeSessions(searchPage.results ?? [], next))
+      setSearchPage("cursor", nextCursor)
+      setSearchPage("complete", !nextCursor)
+      return next.length > 0
+    } finally {
+      if (revision === searchRevision) setSearchPage("loading", false)
+    }
+  }
+
+  async function loadOldestSearchPage(reset: boolean) {
+    const query = search()
+    if (!query) return false
+    if (searchPage.loading) return false
+    const cursor = reset ? undefined : searchPage.oldestCursor
+    if (!reset && (searchPage.oldestComplete || !cursor)) return false
+
+    const revision = ++searchRevision
+    setSearchPage("loading", true)
+    try {
+      const response = await sdk.client.session.list({
+        search: query,
+        limit: searchPageSize,
+        order: "asc",
+        cursor,
+        ...sessionFilter(),
+      })
+      if (revision !== searchRevision) return false
+      const next = response.data ?? []
+      const nextCursor = response.response.headers.get("x-next-cursor") ?? undefined
+      setSearchPage("results", mergeSessions(searchPage.results ?? [], next))
+      setSearchPage("oldestCursor", nextCursor)
+      setSearchPage("oldestComplete", !nextCursor)
+      setSearchPage("oldestTop", next.at(-1)?.id ?? searchPage.oldestTop)
+      return next.length > 0
+    } finally {
+      if (revision === searchRevision) setSearchPage("loading", false)
+    }
+  }
+
+  createEffect(
+    on([search, sessionFilterKey], () => {
+      void loadSearchPage(true)
+    }),
+  )
 
   function recover(session: NonNullable<ReturnType<typeof sessions>[number]>) {
     const workspace = project.workspace.get(session.workspaceID!)
@@ -100,7 +198,7 @@ export function DialogSessionList() {
           }
           await project.workspace.sync()
           await sync.session.refresh()
-          if (search()) await refetch()
+          if (search()) await loadSearchPage(true)
           if (info?.workspaceID === session.workspaceID) {
             route.navigate({ type: "home" })
           }
@@ -123,14 +221,18 @@ export function DialogSessionList() {
     ))
   }
 
+  function compareSessionRecency(a: Session, b: Session) {
+    return b.time.updated - a.time.updated || b.id.localeCompare(a.id)
+  }
+
   function orderByRecency(sessionsList: NonNullable<ReturnType<typeof sessions>>) {
     return sessionsList
       .filter((x) => x.parentID === undefined)
-      .toSorted((a, b) => b.time.updated - a.time.updated)
+      .toSorted(compareSessionRecency)
       .map((x) => x.id)
   }
 
-  const [browseOrder] = createSignal<string[]>(orderByRecency(sync.data.session))
+  const browseOrder = createMemo(() => orderByRecency(sync.data.session))
 
   const quickSwitchHint = createMemo(() => {
     const first = quickSwitch1()
@@ -151,7 +253,7 @@ export function DialogSessionList() {
         .map((x) => [x.id, x]),
     )
 
-    const searchResult = searchResults()
+    const searchResult = searchPage.results
     const displayOrder = searchResult ? orderByRecency(searchResult) : browseOrder()
 
     const pinned = local.session.pinned().filter((id) => sessionMap.has(id))
@@ -212,20 +314,170 @@ export function DialogSessionList() {
     return [...pinned.map((id) => buildOption(id, "Pinned")).filter((x) => x !== undefined), ...remaining]
   })
 
+  const searching = createMemo(() => searchPage.results !== undefined)
+  const hasMore = createMemo(() => {
+    if (searching()) return !searchPage.complete && !!searchPage.cursor
+    return sync.session.page.more()
+  })
+  const loadingMore = createMemo(() => (searching() ? searchPage.loading : sync.session.page.loading()))
+  const oldestMore = createMemo(() => {
+    if (searching()) return !searchPage.oldestComplete && !!searchPage.oldestCursor
+    return sync.session.page.oldestMore()
+  })
+  const oldestTop = createMemo(() => (searching() ? searchPage.oldestTop : sync.session.page.oldestTop()))
+
+  function oldestBoundaryIndex(list: { value: string }[]) {
+    const top = oldestTop()
+    if (!top) return -1
+    const sessionMap = new Map(sessions().map((session) => [session.id, session]))
+    const boundary = sessionMap.get(top)
+    if (!boundary) return -1
+    const pinned = new Set(local.session.pinned())
+    // Pinned rows are rendered outside chronological order, so find the
+    // boundary by recency rather than by the marker row's raw option index.
+    return list.findIndex((item) => {
+      if (pinned.has(item.value)) return false
+      const session = sessionMap.get(item.value)
+      return session ? compareSessionRecency(session, boundary) >= 0 : false
+    })
+  }
+
+  async function loadMore() {
+    if (loadingMore()) return
+    if (searching()) {
+      await loadSearchPage(false)
+      return
+    }
+    await sync.session.page.loadMore()
+  }
+
+  async function loadOldestPage() {
+    // Top-to-bottom wrap is an explicit "go to the end" gesture. Fetch the
+    // oldest page directly instead of walking every intermediate cursor page.
+    if (searching()) return loadOldestSearchPage(true)
+    return sync.session.page.loadOldest()
+  }
+
+  async function loadFromOldestPage() {
+    if (searching()) return loadOldestSearchPage(false)
+    return sync.session.page.loadFromOldest()
+  }
+
+  function moveToOldestLoaded() {
+    // Wait for appended rows to render before asking DialogSelect to scroll to one.
+    setTimeout(() => {
+      selectRef.moveTo(options().length - 1, { center: true, notify: false })
+    }, 0)
+  }
+
+  function moveToValue(value: string) {
+    setTimeout(() => {
+      const index = options().findIndex((item) => item?.value === value)
+      if (index < 0) return
+      selectRef.moveTo(index, { notify: false })
+    }, 0)
+  }
+
+  function moveByOffsetFromValue(value: string, offset: number) {
+    setTimeout(() => {
+      const list = options()
+      const index = list.findIndex((item) => item?.value === value)
+      if (index < 0) return
+      const next = Math.max(0, Math.min(list.length - 1, index + offset))
+      selectRef.moveTo(next, { center: true, notify: false })
+    }, 0)
+  }
+
+  function maybeLoadMore(option: { value: string }, event: DialogSelectMoveEvent) {
+    setToDelete(undefined)
+    const list = options()
+    const index = list.findIndex((item) => item?.value === option.value)
+    if (index < 0) return
+    const oldestTopIndex = oldestBoundaryIndex(list)
+    if (event.direction !== undefined && event.direction < 0 && oldestMore() && oldestTopIndex >= 0) {
+      if (index > oldestTopIndex + 5) return
+      void (async () => {
+        const loaded = await loadFromOldestPage()
+        if (loaded) moveToValue(option.value)
+      })()
+      return
+    }
+    if (!hasMore()) return
+    if (index < list.length - 5) return
+    void (async () => {
+      await loadMore()
+    })()
+  }
+
+  function maybeHandleBeforeMove(_option: { value: string }, event: DialogSelectMoveEvent) {
+    setToDelete(undefined)
+    const list = options()
+    const oldestTopIndex = oldestBoundaryIndex(list)
+
+    if (
+      event.direction !== undefined &&
+      event.direction < 0 &&
+      event.wrapped !== "end" &&
+      oldestMore() &&
+      oldestTopIndex >= 0 &&
+      event.previous >= oldestTopIndex &&
+      event.next < oldestTopIndex
+    ) {
+      const previous = list[event.previous]?.value
+      if (!previous) return false
+
+      if (!loadingMore()) {
+        void (async () => {
+          const loaded = await loadFromOldestPage()
+          if (loaded) moveByOffsetFromValue(previous, event.direction!)
+        })()
+      }
+      // Do not let selection jump across the unloaded gap while the adjacent
+      // oldest-side page is being fetched.
+      return false
+    }
+
+    if (event.wrapped !== "end") return
+    if (!hasMore()) return
+    if (!loadingMore()) {
+      void (async () => {
+        await loadOldestPage()
+        moveToOldestLoaded()
+      })()
+    }
+    return false
+  }
+
+  const footerHints = createMemo(() => {
+    const hints = quickSwitchFooterHints()
+    if (!hasMore()) return hints
+    return [
+      ...hints,
+      {
+        title: "older",
+        label: "navigate to bottom",
+        side: "right" as const,
+      },
+    ]
+  })
+
   onMount(() => {
     dialog.setSize("large")
   })
 
   return (
     <DialogSelect
+      ref={(ref) => {
+        selectRef = ref
+      }}
       title="Sessions"
       options={options()}
       skipFilter={true}
       current={currentSessionID()}
       onFilter={setSearch}
-      onMove={() => {
-        setToDelete(undefined)
-      }}
+      onBeforeMove={maybeHandleBeforeMove}
+      onMove={maybeLoadMore}
+      footerHints={footerHints()}
       onSelect={(option) => {
         route.navigate({
           type: "session",
@@ -282,7 +534,7 @@ export function DialogSessionList() {
               if (status && status !== "connected") {
                 await sync.session.refresh()
               }
-              if (search()) await refetch()
+              if (search()) await loadSearchPage(true)
               setToDelete(undefined)
               return
             }
@@ -297,7 +549,6 @@ export function DialogSessionList() {
           },
         },
       ]}
-      footerHints={quickSwitchFooterHints()}
     />
   )
 }

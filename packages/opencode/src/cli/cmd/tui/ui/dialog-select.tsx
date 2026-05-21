@@ -26,7 +26,8 @@ export interface DialogSelectProps<T> {
   options: DialogSelectOption<T>[]
   flat?: boolean
   ref?: (ref: DialogSelectRef<T>) => void
-  onMove?: (option: DialogSelectOption<T>) => void
+  onBeforeMove?: (option: DialogSelectOption<T>, event: DialogSelectMoveEvent) => boolean | void
+  onMove?: (option: DialogSelectOption<T>, event: DialogSelectMoveEvent) => void
   onFilter?: (query: string) => void
   onSelect?: (option: DialogSelectOption<T>) => void
   skipFilter?: boolean
@@ -61,9 +62,17 @@ export interface DialogSelectOption<T = any> {
   onSelect?: (ctx: DialogContext) => void
 }
 
+export type DialogSelectMoveEvent = {
+  previous: number
+  next: number
+  direction?: number
+  wrapped?: "start" | "end"
+}
+
 export type DialogSelectRef<T> = {
   filter: string
   filtered: DialogSelectOption<T>[]
+  moveTo: (index: number, options?: { center?: boolean; notify?: boolean }) => void
 }
 
 export function DialogSelect<T>(props: DialogSelectProps<T>) {
@@ -192,23 +201,39 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
 
   function move(direction: number) {
     if (flat().length === 0) return
+    const previous = store.selected
     let next = store.selected + direction
+    let wrapped: DialogSelectMoveEvent["wrapped"]
     if (next < 0) next = flat().length - 1
-    if (next >= flat().length) next = 0
-    moveTo(next, true)
+    if (next === flat().length - 1 && direction < 0 && previous === 0) wrapped = "end"
+    if (next >= flat().length) {
+      next = 0
+      wrapped = "start"
+    }
+    const event = { previous, next, direction, wrapped }
+    const option = flat()[next]
+    if (option && props.onBeforeMove?.(option, event) === false) return
+    moveTo(next, { center: true, event })
   }
 
-  function moveTo(next: number, center = false) {
+  function moveTo(
+    next: number,
+    input: boolean | { center?: boolean; notify?: boolean; event?: DialogSelectMoveEvent } = false,
+  ) {
+    const options = typeof input === "boolean" ? { center: input } : input
+    const previous = store.selected
     setStore("selected", next)
     const option = selected()
-    if (option) props.onMove?.(option)
+    if (option && options.notify !== false) {
+      props.onMove?.(option, options.event ?? { previous, next })
+    }
     if (!scroll) return
     const target = scroll.getChildren().find((child: { id?: string }) => {
       return child.id === JSON.stringify(selected()?.value)
     })
     if (!target) return
     const y = target.y - scroll.y
-    if (center) {
+    if (options.center) {
       const centerOffset = Math.floor(scroll.height / 2)
       scroll.scrollBy(y - centerOffset)
     } else {
@@ -335,6 +360,9 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     },
     get filtered() {
       return filtered()
+    },
+    moveTo(index, options) {
+      moveTo(index, options)
     },
   }
   props.ref?.(ref)
