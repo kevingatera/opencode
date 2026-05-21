@@ -3050,6 +3050,8 @@ export class Session2 extends HeyApiClient {
       start?: number
       search?: string
       limit?: number
+      order?: "asc" | "desc"
+      cursor?: string
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -3066,6 +3068,8 @@ export class Session2 extends HeyApiClient {
             { in: "query", key: "start" },
             { in: "query", key: "search" },
             { in: "query", key: "limit" },
+            { in: "query", key: "order" },
+            { in: "query", key: "cursor" },
           ],
         },
       ],
