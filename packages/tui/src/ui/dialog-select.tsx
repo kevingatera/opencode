@@ -29,7 +29,8 @@ export interface DialogSelectProps<T> {
   options: DialogSelectOption<T>[]
   flat?: boolean
   ref?: (ref: DialogSelectRef<T>) => void
-  onMove?: (option: DialogSelectOption<T>) => void
+  onBeforeMove?: (option: DialogSelectOption<T>, event: DialogSelectMoveEvent) => boolean | void
+  onMove?: (option: DialogSelectOption<T>, event: DialogSelectMoveEvent) => void
   onFilter?: (query: string) => void
   onSelect?: (option: DialogSelectOption<T>) => void
   skipFilter?: boolean
@@ -71,10 +72,18 @@ export interface DialogSelectOption<T = any> {
   onSelect?: (ctx: DialogContext) => void
 }
 
+export type DialogSelectMoveEvent = {
+  previous: number
+  next: number
+  direction?: number
+  wrapped?: "start" | "end"
+}
+
 export type DialogSelectRef<T> = {
   filter: string
   filtered: DialogSelectOption<T>[]
-  moveTo(value: T): void
+  selected: DialogSelectOption<T> | undefined
+  moveTo(target: number | T, options?: { center?: boolean; notify?: boolean }): void
 }
 
 export function DialogSelect<T>(props: DialogSelectProps<T>) {
@@ -276,7 +285,7 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
       if (filter.length > 0) resetSelection = true
       setTimeout(() => {
         if (filter.length > 0) {
-          moveTo(0, true, false)
+          moveTo(0, { center: true, preserve: false })
         } else if (current) {
           const currentIndex = flat().findIndex((opt) => isDeepEqual(opt.value, current))
           if (currentIndex >= 0) {
@@ -290,22 +299,39 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
   function move(direction: number) {
     if (props.locked) return
     if (flat().length === 0) return
+    const previous = store.selected
     let next = store.selected + direction
+    let wrapped: DialogSelectMoveEvent["wrapped"]
     if (next < 0) next = flat().length - 1
-    if (next >= flat().length) next = 0
-    moveTo(next, true)
+    if (next === flat().length - 1 && direction < 0 && previous === 0) wrapped = "end"
+    if (next >= flat().length) {
+      next = 0
+      wrapped = "start"
+    }
+    const event = { previous, next, direction, wrapped }
+    const option = flat()[next]
+    if (option && props.onBeforeMove?.(option, event) === false) return
+    moveTo(next, { center: true, event })
   }
 
-  function moveTo(next: number, center = false, preserve = true) {
+  function moveTo(
+    next: number,
+    input: boolean | { center?: boolean; notify?: boolean; preserve?: boolean; event?: DialogSelectMoveEvent } = false,
+  ) {
     setFocusedAction(undefined)
+    const moveOpts = typeof input === "boolean" ? { center: input } : input
+    const preserve = moveOpts.preserve ?? true
+    const previous = store.selected
     setStore("selected", next)
     const option = selected()
     if (option) {
       selection = option
       resetSelection = !preserve
     }
-    if (option) props.onMove?.(option)
-    scrollToSelection(center)
+    if (option && moveOpts.notify !== false) {
+      props.onMove?.(option, moveOpts.event ?? { previous, next })
+    }
+    scrollToSelection(!!moveOpts.center)
   }
 
   function scrollToSelection(center: boolean) {
@@ -313,14 +339,14 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     let remaining = store.selected
     let index = 0
     // Locate the row by position because a unique renderable ID cannot currently be ensured.
-    for (const [category, options] of grouped()) {
+    for (const [category, categoryOptions] of grouped()) {
       if (category) index++
-      if (remaining < options.length) {
+      if (remaining < categoryOptions.length) {
         index += remaining
         break
       }
-      index += options.length
-      remaining -= options.length
+      index += categoryOptions.length
+      remaining -= categoryOptions.length
     }
     const target = scroll.getChildren()[index]
     if (!target) return
@@ -490,9 +516,16 @@ export function DialogSelect<T>(props: DialogSelectProps<T>) {
     get filtered() {
       return filtered()
     },
-    moveTo(value) {
-      const index = flat().findIndex((option) => isDeepEqual(option.value, value))
-      if (index >= 0) moveTo(index, true)
+    get selected() {
+      return selected()
+    },
+    moveTo(target, options) {
+      if (typeof target === "number") {
+        moveTo(target, options)
+        return
+      }
+      const index = flat().findIndex((option) => isDeepEqual(option.value, target))
+      if (index >= 0) moveTo(index, { center: true, ...options })
     },
   }
   props.ref?.(ref)

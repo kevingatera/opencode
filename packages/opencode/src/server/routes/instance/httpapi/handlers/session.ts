@@ -45,6 +45,43 @@ const tryParseJson = (text: string) =>
     catch: () => new HttpApiError.BadRequest({}),
   })
 
+function sanitizeAssistantMessageText(message: SessionV1.WithParts): SessionV1.WithParts {
+  if (message.info.role !== "assistant") return message
+  return {
+    ...message,
+    parts: message.parts.map((part) => {
+      if (part.type !== "text") return part
+      return {
+        ...part,
+        text: MessageV2.sanitizeAssistantText(part.text),
+      }
+    }),
+  }
+}
+
+const sessionListCursor = {
+  encode(session: Session.Info) {
+    return Buffer.from(JSON.stringify({ id: session.id, time: session.time.updated })).toString("base64url")
+  },
+  decode(value: string) {
+    return Effect.try({
+      try: () => {
+        const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as {
+          id?: unknown
+          time?: unknown
+        }
+        if (typeof parsed.id !== "string") throw new Error("invalid cursor id")
+        if (typeof parsed.time !== "number" || !Number.isFinite(parsed.time)) throw new Error("invalid cursor time")
+        return {
+          id: SessionID.make(parsed.id),
+          time: parsed.time,
+        }
+      },
+      catch: () => new HttpApiError.BadRequest({}),
+    })
+  },
+}
+
 export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", (handlers) =>
   Effect.gen(function* () {
     const session = yield* Session.Service
@@ -63,14 +100,35 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
 
     const list = Effect.fn("SessionHttpApi.list")(function* (ctx: { query: typeof ListQuery.Type }) {
       const directory = ctx.query.directory ? yield* InstanceState.directory : undefined
-      return yield* session.list({
+      const limit = ctx.query.limit
+      const cursor = ctx.query.cursor ? yield* sessionListCursor.decode(ctx.query.cursor) : undefined
+      const sessions = yield* session.list({
         directory: ctx.query.scope === "project" ? undefined : directory,
         scope: ctx.query.scope,
         path: ctx.query.path,
         roots: ctx.query.roots,
         start: ctx.query.start,
         search: ctx.query.search,
-        limit: ctx.query.limit,
+        limit: limit === undefined ? undefined : limit + 1,
+        order: ctx.query.order,
+        cursor,
+      })
+      if (limit === undefined || sessions.length <= limit) return sessions
+
+      const items = sessions.slice(0, limit)
+      const next = items.at(-1)
+      if (!next) return items
+
+      const request = yield* HttpServerRequest.HttpServerRequest
+      const url = Option.getOrElse(HttpServerRequest.toURL(request), () => new URL(request.url, "http://localhost"))
+      url.searchParams.set("limit", limit.toString())
+      url.searchParams.set("cursor", sessionListCursor.encode(next))
+      return HttpServerResponse.jsonUnsafe(items, {
+        headers: {
+          "Access-Control-Expose-Headers": "Link, X-Next-Cursor",
+          Link: `<${url.toString()}>; rel="next"`,
+          "X-Next-Cursor": sessionListCursor.encode(next),
+        },
       })
     })
 
@@ -117,7 +175,8 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       }
       yield* requireSession(ctx.params.sessionID)
       if (ctx.query.limit === undefined || ctx.query.limit === 0) {
-        return yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+        const messages = yield* SessionError.mapStorageNotFound(session.messages({ sessionID: ctx.params.sessionID }))
+        return messages.map(sanitizeAssistantMessageText)
       }
 
       const page = yield* SessionError.mapStorageNotFound(
@@ -125,9 +184,11 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           sessionID: ctx.params.sessionID,
           limit: ctx.query.limit,
           before: ctx.query.before,
+          order: ctx.query.order,
         }),
       )
-      if (!page.cursor) return page.items
+      const items = page.items.map(sanitizeAssistantMessageText)
+      if (!page.cursor) return items
 
       const request = yield* HttpServerRequest.HttpServerRequest
       // toURL() honors the Host + x-forwarded-proto headers, so the Link
@@ -135,7 +196,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
       const url = Option.getOrElse(HttpServerRequest.toURL(request), () => new URL(request.url, "http://localhost"))
       url.searchParams.set("limit", ctx.query.limit.toString())
       url.searchParams.set("before", page.cursor)
-      return HttpServerResponse.jsonUnsafe(page.items, {
+      return HttpServerResponse.jsonUnsafe(items, {
         headers: {
           "Access-Control-Expose-Headers": "Link, X-Next-Cursor",
           Link: `<${url.toString()}>; rel="next"`,
@@ -147,9 +208,10 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     const message = Effect.fn("SessionHttpApi.message")(function* (ctx: {
       params: { sessionID: SessionID; messageID: MessageID }
     }) {
-      return yield* SessionError.mapStorageNotFound(
+      const message = yield* SessionError.mapStorageNotFound(
         MessageV2.get({ sessionID: ctx.params.sessionID, messageID: ctx.params.messageID }),
       )
+      return sanitizeAssistantMessageText(message)
     })
 
     const create = Effect.fn("SessionHttpApi.create")(function* (ctx: { payload?: Session.CreateInput }) {
