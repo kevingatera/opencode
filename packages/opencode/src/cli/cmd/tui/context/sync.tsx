@@ -141,6 +141,27 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
       )
     }
 
+    function mergeSessionMessages(
+      sessionID: string,
+      incoming: {
+        info: Message
+        parts: Part[]
+      }[],
+    ) {
+      if (incoming.length === 0) return
+      setStore(
+        produce((draft) => {
+          const current = draft.message[sessionID] ?? []
+          draft.message[sessionID] = [
+            ...new Map([...current, ...incoming.map((item) => item.info)].map((item) => [item.id, item])).values(),
+          ].toSorted((a, b) => a.time.created - b.time.created || a.id.localeCompare(b.id))
+          for (const item of incoming) {
+            draft.part[item.info.id] = item.parts
+          }
+        }),
+      )
+    }
+
     async function loadSessionListPage(input?: { order?: "asc"; cursor?: string }) {
       if (sessionPage.loading && (input?.order || input?.cursor)) return
       setSessionPage("loading", true)
@@ -545,6 +566,7 @@ export const { use: useSync, provider: SyncProvider } = createSimpleContext({
         query() {
           return sessionListQuery()
         },
+        mergeMessages: mergeSessionMessages,
         async refresh() {
           const list = await listSessions()
           setStore("session", reconcile(list))

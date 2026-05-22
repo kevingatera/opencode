@@ -3,7 +3,7 @@ import { describe, expect, test } from "bun:test"
 import { Global } from "@opencode-ai/core/global"
 import { tmpdir } from "../../../fixture/fixture"
 import { json, mount, wait } from "./sync-fixture"
-import type { GlobalEvent, Session } from "@opencode-ai/sdk/v2"
+import type { GlobalEvent, Message, Part, Session } from "@opencode-ai/sdk/v2"
 
 function branchEvent(branch: string, workspace?: string): GlobalEvent {
   return {
@@ -30,6 +30,28 @@ function session(id: string, updated: number): Session {
       created: updated,
       updated,
     },
+  }
+}
+
+function message(id: string, created: number): Message {
+  return {
+    id,
+    sessionID: "ses_test",
+    role: "user",
+    time: { created },
+    agent: "test",
+    model: { providerID: "test", modelID: "test" },
+    tools: {},
+  }
+}
+
+function part(id: string, messageID: string): Part {
+  return {
+    id,
+    sessionID: "ses_test",
+    messageID,
+    type: "text",
+    text: id,
   }
 }
 
@@ -202,6 +224,29 @@ describe("tui sync", () => {
       expect(new Set(ids).size).toBe(250)
       expect(calls.filter((url) => url.searchParams.get("order") === "asc")).toHaveLength(5)
       expect(sync.session.page.oldestMore()).toBe(false)
+    } finally {
+      app.renderer.destroy()
+      Global.Path.state = previous
+    }
+  })
+
+  test("merges paged messages into the synced transcript in chronological order", async () => {
+    const previous = Global.Path.state
+    await using tmp = await tmpdir()
+    Global.Path.state = tmp.path
+    await Bun.write(`${tmp.path}/kv.json`, "{}")
+    const { app, sync } = await mount()
+
+    try {
+      sync.session.mergeMessages("ses_test", [
+        { info: message("msg_new", 3), parts: [part("part_new", "msg_new")] },
+        { info: message("msg_old", 1), parts: [part("part_old", "msg_old")] },
+      ])
+      sync.session.mergeMessages("ses_test", [{ info: message("msg_mid", 2), parts: [part("part_mid", "msg_mid")] }])
+
+      expect(sync.data.message.ses_test.map((item) => item.id)).toEqual(["msg_old", "msg_mid", "msg_new"])
+      expect(sync.data.part.msg_old.map((item) => item.id)).toEqual(["part_old"])
+      expect(sync.data.part.msg_mid.map((item) => item.id)).toEqual(["part_mid"])
     } finally {
       app.renderer.destroy()
       Global.Path.state = previous

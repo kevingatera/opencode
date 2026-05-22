@@ -71,6 +71,7 @@ export function DialogForkFromTimeline(props: { sessionID: string; onMove: (mess
     setLoading(true)
     try {
       const page = await fetchMessages()
+      sync.session.mergeMessages(props.sessionID, page.items)
       setMessages(page.items)
       setNewestCursor(page.cursor)
       setNewestComplete(!page.cursor)
@@ -91,6 +92,7 @@ export function DialogForkFromTimeline(props: { sessionID: string; onMove: (mess
     setLoading(true)
     try {
       const page = await fetchMessages({ before })
+      sync.session.mergeMessages(props.sessionID, page.items)
       setMessages(mergeForkTimelineMessages(messages(), page.items))
       setNewestCursor(page.cursor)
       setNewestComplete(!page.cursor)
@@ -106,6 +108,7 @@ export function DialogForkFromTimeline(props: { sessionID: string; onMove: (mess
     setLoading(true)
     try {
       const page = await fetchMessages({ order: "asc" })
+      sync.session.mergeMessages(props.sessionID, page.items)
       setMessages(mergeForkTimelineMessages(messages(), page.items))
       setOldestCursor(page.cursor)
       setOldestComplete(!page.cursor)
@@ -125,6 +128,7 @@ export function DialogForkFromTimeline(props: { sessionID: string; onMove: (mess
       // The legacy query parameter is named "before"; with order=asc it is the
       // cursor for the next newer page from the oldest side.
       const page = await fetchMessages({ order: "asc", before })
+      sync.session.mergeMessages(props.sessionID, page.items)
       setMessages(mergeForkTimelineMessages(messages(), page.items))
       setOldestCursor(page.cursor)
       setOldestComplete(!page.cursor)
@@ -219,13 +223,19 @@ export function DialogForkFromTimeline(props: { sessionID: string; onMove: (mess
 
   function moveToOldestLoaded() {
     setTimeout(() => {
-      selectRef.moveTo(options().length - 1, { center: true, notify: false })
+      const index = options().length - 1
+      const option = options()[index]
+      selectRef.moveTo(index, { center: true, notify: false })
+      props.onMove(option?.value)
     }, 0)
   }
 
   function moveToNextLoaded(previous: number) {
     setTimeout(() => {
-      selectRef.moveTo(Math.min(previous + 1, options().length - 1), { center: true, notify: false })
+      const index = Math.min(previous + 1, options().length - 1)
+      const option = options()[index]
+      selectRef.moveTo(index, { center: true, notify: false })
+      props.onMove(option?.value)
     }, 0)
   }
 
@@ -235,7 +245,9 @@ export function DialogForkFromTimeline(props: { sessionID: string; onMove: (mess
       const index = list.findIndex((item) => item.value === value)
       if (index < 0) return
       const next = Math.max(0, Math.min(list.length - 1, index + offset))
+      const option = list[next]
       selectRef.moveTo(next, { center: true, notify: false })
+      props.onMove(option?.value)
     }, 0)
   }
 
