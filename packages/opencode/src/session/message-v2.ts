@@ -8,8 +8,10 @@ import { SyncEvent } from "../sync"
 import { Database } from "@/storage/db"
 import { NotFoundError } from "@/storage/storage"
 import { and } from "drizzle-orm"
+import { asc } from "drizzle-orm"
 import { desc } from "drizzle-orm"
 import { eq } from "drizzle-orm"
+import { gt } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
@@ -595,6 +597,9 @@ const part = (row: typeof PartTable.$inferSelect) =>
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
 
+const newer = (row: Cursor) =>
+  or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gt(MessageTable.id, row.id)))
+
 function hydrate(rows: (typeof MessageTable.$inferSelect)[]) {
   const ids = rows.map((row) => row.id)
   const partByMessage = new Map<string, Part[]>()
@@ -924,17 +929,22 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
   limit: number
   before?: string
+  order?: "asc" | "desc"
 }) {
   const before = input.before ? cursor.decode(input.before) : undefined
+  const order = input.order ?? "desc"
   const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+    ? and(eq(MessageTable.session_id, input.sessionID), order === "asc" ? newer(before) : older(before))
     : eq(MessageTable.session_id, input.sessionID)
   const rows = Database.use((db) =>
     db
       .select()
       .from(MessageTable)
       .where(where)
-      .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+      .orderBy(
+        order === "asc" ? asc(MessageTable.time_created) : desc(MessageTable.time_created),
+        order === "asc" ? asc(MessageTable.id) : desc(MessageTable.id),
+      )
       .limit(input.limit + 1)
       .all(),
   )
@@ -952,7 +962,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
   const items = hydrate(slice)
-  items.reverse()
+  if (order === "desc") items.reverse()
   const tail = slice.at(-1)
   return {
     items,

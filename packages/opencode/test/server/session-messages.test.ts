@@ -176,6 +176,31 @@ describe("session messages endpoint", () => {
   )
 
   it.instance(
+    "returns oldest message pages directly",
+    withoutWatcher(
+      Effect.gen(function* () {
+        const session = yield* sessionScoped
+        const ids = yield* fill(session.id, 5)
+
+        const a = yield* request(`/session/${session.id}/message?limit=2&order=asc`)
+        expect(a.status).toBe(200)
+        const aBody = yield* json<MessageV2.WithParts[]>(a)
+        expect(aBody.map((item) => item.info.id)).toEqual(ids.slice(0, 2))
+        const cursor = a.headers.get("x-next-cursor")
+        expect(cursor).toBeTruthy()
+
+        const b = yield* request(
+          `/session/${session.id}/message?limit=2&order=asc&before=${encodeURIComponent(cursor!)}`,
+        )
+        expect(b.status).toBe(200)
+        const bBody = yield* json<MessageV2.WithParts[]>(b)
+        expect(bBody.map((item) => item.info.id)).toEqual(ids.slice(2, 4))
+      }),
+    ),
+    { git: true },
+  )
+
+  it.instance(
     "keeps full-history responses when limit is omitted",
     withoutWatcher(
       Effect.gen(function* () {

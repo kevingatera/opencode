@@ -168,6 +168,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
           sessionID: ctx.params.sessionID,
           limit: ctx.query.limit,
           before: ctx.query.before,
+          order: ctx.query.order,
         }),
       )
       if (!page.cursor) return page.items
