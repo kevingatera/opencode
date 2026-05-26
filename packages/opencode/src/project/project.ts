@@ -1,5 +1,5 @@
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { and, eq, sql } from "drizzle-orm"
+import { and, eq, ne, sql } from "drizzle-orm"
 import { Database } from "@opencode-ai/core/database/database"
 import { ProjectDirectoryTable, ProjectTable } from "@opencode-ai/core/project/sql"
 import { ProjectDirectories } from "@opencode-ai/core/project/directories"
@@ -210,6 +210,25 @@ const layer = Layer.effect(
         )
     })
 
+    const migrateProjectsByWorktree = Effect.fn("Project.migrateProjectsByWorktree")(function* (
+      worktree: string,
+      newID: ProjectV2.ID,
+    ) {
+      if (newID === ProjectV2.ID.global) return
+
+      const rows = yield* db
+        .select({ id: ProjectTable.id })
+        .from(ProjectTable)
+        .where(and(eq(ProjectTable.worktree, AbsolutePath.make(worktree)), ne(ProjectTable.id, newID)))
+        .all()
+        .pipe(Effect.orDie)
+      for (const row of rows) {
+        // Older installs keyed projects by repository root. If no repo-local
+        // cache exists, remote-based IDs cannot discover that old ID directly.
+        yield* migrateProjectId(row.id, newID)
+      }
+    })
+
     const fromDirectory = Effect.fn("Project.fromDirectory")(function* (directory: string) {
       yield* Effect.logInfo("fromDirectory", { directory })
 
@@ -219,6 +238,7 @@ const layer = Layer.effect(
       // Phase 2: upsert
       const projectID = ProjectV2.ID.make(data.id)
       yield* migrateProjectId(data.previous ? ProjectV2.ID.make(data.previous) : undefined, projectID)
+      yield* migrateProjectsByWorktree(worktree, projectID)
       const row = yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, projectID)).get().pipe(Effect.orDie)
       const existing = row
         ? fromRow(row)
