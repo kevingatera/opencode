@@ -25,11 +25,10 @@ import type {
   SessionMessageModelSwitched,
   SessionMessageShell,
   SessionMessageUser,
-  ToolFileContent,
-  ToolTextContent,
 } from "@opencode-ai/sdk/v2"
 import { createEffect, createMemo, createSignal, For, Match, Show, Switch } from "solid-js"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
+import { toolViewModel, type ToolViewModel } from "../../util/tool-view-model"
 
 const id = "internal:session-v2-debug"
 const route = "session.v2.messages"
@@ -447,63 +446,72 @@ function CollapsedReasoningText(props: { title: string | null }) {
 }
 
 function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: string }) {
-  const input = createMemo(() => toolInputRecord(props.part.state.input))
-  const name = createMemo(() => toolName(props.part))
+  const view = createMemo(() =>
+    toolViewModel({
+      part: props.part,
+      input: props.part.state.input,
+      metadata: props.part.provider?.metadata,
+      content: props.part.state.status === "pending" ? undefined : props.part.state.content,
+    }),
+  )
   const toolprops = {
     get input() {
-      return input()
+      return view().input
     },
     get metadata() {
-      return props.part.provider?.metadata ?? {}
+      return view().metadata
     },
     get output() {
-      return props.part.state.status === "pending" ? undefined : toolOutput(props.part.state.content)
+      return view().output
+    },
+    get view() {
+      return view()
     },
     sessionID: props.sessionID,
     part: props.part,
   }
   return (
     <Switch>
-      <Match when={name() === "bash" || name() === "shell"}>
+      <Match when={view().name === "bash" || view().name === "shell"}>
         <Bash {...toolprops} />
       </Match>
-      <Match when={name() === "glob"}>
+      <Match when={view().name === "glob"}>
         <Glob {...toolprops} />
       </Match>
-      <Match when={name() === "read"}>
+      <Match when={view().name === "read"}>
         <Read {...toolprops} />
       </Match>
-      <Match when={name() === "grep"}>
+      <Match when={view().name === "grep"}>
         <Grep {...toolprops} />
       </Match>
-      <Match when={isListTool(name())}>
+      <Match when={view().isList}>
         <Ls {...toolprops} />
       </Match>
-      <Match when={name() === "webfetch"}>
+      <Match when={view().name === "webfetch"}>
         <WebFetch {...toolprops} />
       </Match>
-      <Match when={name() === "websearch"}>
+      <Match when={view().name === "websearch"}>
         <WebSearch {...toolprops} />
       </Match>
-      <Match when={name() === "write"}>
+      <Match when={view().name === "write"}>
         <Write {...toolprops} />
       </Match>
-      <Match when={name() === "edit"}>
+      <Match when={view().name === "edit"}>
         <Edit {...toolprops} />
       </Match>
-      <Match when={name() === "apply_patch"}>
+      <Match when={view().name === "apply_patch"}>
         <ApplyPatch {...toolprops} />
       </Match>
-      <Match when={name() === "todowrite"}>
+      <Match when={view().name === "todowrite"}>
         <TodoWrite {...toolprops} />
       </Match>
-      <Match when={name() === "question"}>
+      <Match when={view().name === "question"}>
         <Question {...toolprops} />
       </Match>
-      <Match when={name() === "skill"}>
+      <Match when={view().name === "skill"}>
         <Skill {...toolprops} />
       </Match>
-      <Match when={name() === "task"}>
+      <Match when={view().name === "task"}>
         <Task {...toolprops} />
       </Match>
       <Match when={true}>
@@ -517,6 +525,7 @@ type ToolProps = {
   input: Record<string, unknown>
   metadata: Record<string, unknown>
   output?: string
+  view: ToolViewModel
   sessionID: string
   part: SessionMessageAssistantTool
 }
@@ -538,12 +547,12 @@ function GenericTool(props: ToolProps) {
       when={output()}
       fallback={
         <InlineTool icon="⚙" pending="Writing command..." complete={toolComplete(props.part)} part={props.part}>
-          {toolName(props.part)} {input(props.input)}
+          {props.view.name} {input(props.input)}
         </InlineTool>
       }
     >
       <BlockTool
-        title={`# ${toolName(props.part)} ${input(props.input)}`}
+        title={`# ${props.view.name} ${input(props.input)}`}
         part={props.part}
         onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
       >
@@ -765,7 +774,7 @@ function Glob(props: ToolProps) {
 
 function Read(props: ToolProps) {
   const { theme } = useTheme()
-  const filePath = createMemo(() => inputFilePath(props.input) ?? pendingInput(props.part))
+  const filePath = createMemo(() => props.view.filePath ?? pendingInput(props.part))
   const loaded = createMemo(() =>
     arrayValue(props.metadata.loaded).filter((item): item is string => typeof item === "string"),
   )
@@ -867,8 +876,8 @@ function WebSearch(props: ToolProps) {
 
 function Write(props: ToolProps) {
   const { theme, syntax } = useTheme()
-  const filePath = createMemo(() => inputFilePath(props.input) ?? "")
-  const content = createMemo(() => stringValue(props.input.content) ?? stringValue(props.input.file_content) ?? "")
+  const filePath = createMemo(() => props.view.filePath ?? "")
+  const content = createMemo(() => props.view.content ?? "")
   return (
     <Switch>
       <Match when={content() && props.part.state.status === "completed"}>
@@ -897,7 +906,7 @@ function Write(props: ToolProps) {
 function Edit(props: ToolProps) {
   const { theme, syntax } = useTheme()
   const dimensions = useTerminalDimensions()
-  const filePath = createMemo(() => inputFilePath(props.input) ?? "")
+  const filePath = createMemo(() => props.view.filePath ?? "")
   const diff = createMemo(() => stringValue(props.metadata.diff))
   return (
     <Switch>
@@ -1105,34 +1114,6 @@ function Diagnostics(props: { diagnostics: unknown; filePath: string }) {
       </box>
     </Show>
   )
-}
-
-function toolOutput(content?: Array<ToolTextContent | ToolFileContent>) {
-  return (content ?? [])
-    .map((item) => {
-      if (item.type === "text") return item.text.trim()
-      return `[file ${item.name ?? item.uri}]`
-    })
-    .filter(Boolean)
-    .join("\n")
-}
-
-function toolInputRecord(input: string | Record<string, unknown>) {
-  if (typeof input === "string") return {}
-  return input
-}
-
-function toolName(part: SessionMessageAssistantTool) {
-  const value = part as SessionMessageAssistantTool & { tool?: unknown }
-  return stringValue(value.name) ?? stringValue(value.tool) ?? ""
-}
-
-function isListTool(name: string) {
-  return name === "ls" || name === "list" || name === "list_directory"
-}
-
-function inputFilePath(input: Record<string, unknown>) {
-  return stringValue(input.filePath) ?? stringValue(input.path) ?? stringValue(input.file_path)
 }
 
 function pendingInput(part: SessionMessageAssistantTool) {

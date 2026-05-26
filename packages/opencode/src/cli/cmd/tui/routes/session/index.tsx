@@ -90,6 +90,7 @@ import { SessionRetry } from "@/session/retry"
 import { getRevertDiffFiles } from "../../util/revert-diff"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut, useOpencodeKeymap } from "../../keymap"
 import { PathFormatterProvider, usePathFormatter } from "../../context/path-format"
+import { toolViewModel, type ToolViewModel } from "../../util/tool-view-model"
 
 addDefaultParsers(parsers.parsers)
 
@@ -1600,6 +1601,14 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
 function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMessage }) {
   const ctx = use()
   const sync = useSync()
+  const view = createMemo(() =>
+    toolViewModel({
+      tool: props.part.tool,
+      input: props.part.state.input,
+      metadata: props.part.state.status === "pending" ? undefined : props.part.state.metadata,
+      output: props.part.state.status === "completed" ? props.part.state.output : undefined,
+    }),
+  )
 
   // Hide tool if showDetails is false and tool completed successfully
   const shouldHide = createMemo(() => {
@@ -1610,13 +1619,16 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
 
   const toolprops = {
     get metadata() {
-      return props.part.state.status === "pending" ? {} : (props.part.state.metadata ?? {})
+      return view().metadata
     },
     get input() {
-      return props.part.state.input ?? {}
+      return view().input
     },
     get output() {
-      return props.part.state.status === "completed" ? props.part.state.output : undefined
+      return view().output
+    },
+    get view() {
+      return view()
     },
     get permission() {
       const permissions = sync.data.permission[props.message.sessionID] ?? []
@@ -1624,7 +1636,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
       return permissions[permissionIndex]
     },
     get tool() {
-      return props.part.tool
+      return view().name
     },
     get part() {
       return props.part
@@ -1634,46 +1646,46 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   return (
     <Show when={!shouldHide()}>
       <Switch>
-        <Match when={props.part.tool === ShellID.ToolID || props.part.tool === "shell"}>
+        <Match when={view().name === ShellID.ToolID || view().name === "shell"}>
           <Shell {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "glob"}>
+        <Match when={view().name === "glob"}>
           <Glob {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "read"}>
+        <Match when={view().name === "read"}>
           <Read {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "grep"}>
+        <Match when={view().name === "grep"}>
           <Grep {...toolprops} />
         </Match>
-        <Match when={isListTool(props.part.tool)}>
+        <Match when={view().isList}>
           <Ls {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "webfetch"}>
+        <Match when={view().name === "webfetch"}>
           <WebFetch {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "websearch"}>
+        <Match when={view().name === "websearch"}>
           <WebSearch {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "write"}>
+        <Match when={view().name === "write"}>
           <Write {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "edit"}>
+        <Match when={view().name === "edit"}>
           <Edit {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "task"}>
+        <Match when={view().name === "task"}>
           <Task {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "apply_patch"}>
+        <Match when={view().name === "apply_patch"}>
           <ApplyPatch {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "todowrite"}>
+        <Match when={view().name === "todowrite"}>
           <TodoWrite {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "question"}>
+        <Match when={view().name === "question"}>
           <Question {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "skill"}>
+        <Match when={view().name === "skill"}>
           <Skill {...toolprops} />
         </Match>
         <Match when={true}>
@@ -1690,6 +1702,7 @@ type ToolProps<T> = {
   permission: Record<string, any>
   tool: string
   output?: string
+  view: ToolViewModel
   part: ToolPart
 }
 function GenericTool(props: ToolProps<any>) {
@@ -1930,10 +1943,8 @@ function Shell(props: ToolProps<typeof ShellTool>) {
 function Write(props: ToolProps<typeof WriteTool>) {
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
-  const filePath = createMemo(() => inputFilePath(props.input))
-  const code = createMemo(() => {
-    return inputString(props.input, "content") ?? inputString(props.input, "file_content") ?? ""
-  })
+  const filePath = createMemo(() => props.view.filePath)
+  const code = createMemo(() => props.view.content ?? "")
 
   return (
     <Switch>
@@ -1976,7 +1987,7 @@ function Read(props: ToolProps<typeof ReadTool>) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
   const isRunning = createMemo(() => props.part.state.status === "running")
-  const filePath = createMemo(() => inputFilePath(props.input))
+  const filePath = createMemo(() => props.view.filePath)
   const loaded = createMemo(() => {
     if (props.part.state.status !== "completed") return []
     if (props.part.state.time.compacted) return []
@@ -2157,7 +2168,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
-  const filePath = createMemo(() => inputFilePath(props.input))
+  const filePath = createMemo(() => props.view.filePath)
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2376,19 +2387,6 @@ function input(input: Record<string, any>, omit?: string[]): string {
   })
   if (primitives.length === 0) return ""
   return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
-}
-
-function inputFilePath(input: Record<string, any>) {
-  return inputString(input, "filePath") ?? inputString(input, "path") ?? inputString(input, "file_path")
-}
-
-function inputString(input: Record<string, any>, key: string) {
-  const value = input[key]
-  return typeof value === "string" ? value : undefined
-}
-
-function isListTool(tool: string) {
-  return tool === "ls" || tool === "list" || tool === "list_directory"
 }
 
 function filetype(input?: string) {
