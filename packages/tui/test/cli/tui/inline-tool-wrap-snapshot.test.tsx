@@ -3,7 +3,9 @@ import { createSignal, For, Show } from "solid-js"
 import type { BoxRenderable, ScrollBoxRenderable } from "@opentui/core"
 import { testRender, type JSX } from "@opentui/solid"
 import {
+  currentSubagentTool,
   formatCompletedSubagentDetail,
+  formatSubagentCurrentTool,
   formatSubagentRetry,
   formatSubagentTitle,
   formatSubagentToolcalls,
@@ -278,6 +280,55 @@ describe("TUI inline tool wrapping", () => {
     expect(formatCompletedSubagentDetail(1, "501ms")).toBe("1 toolcall · 501ms")
     expect(formatCompletedSubagentDetail(2, "501ms")).toBe("2 toolcalls · 501ms")
     expect(formatSubagentToolcalls(0)).toBe("0 toolcalls")
+  })
+
+  test("prefers a running subagent tool over a completed grep with title", () => {
+    const tools = [
+      {
+        tool: "grep",
+        state: {
+          status: "completed",
+          title: "reduceSessionData",
+          input: { pattern: "reduceSessionData" },
+        },
+      },
+      {
+        tool: "read",
+        state: {
+          status: "running",
+          input: { filePath: "/tmp/src/cli/cmd/run/subagent-data.ts" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("read")
+    expect(formatSubagentCurrentTool("read", tools[1].state)).toBe(
+      "Read /tmp/src/cli/cmd/run/subagent-data.ts",
+    )
+  })
+
+  test("falls back to the latest completed titled tool when nothing is running", () => {
+    const tools = [
+      {
+        tool: "grep",
+        state: {
+          status: "completed",
+          title: "reduceSessionData",
+          input: { pattern: "reduceSessionData" },
+        },
+      },
+      {
+        tool: "read",
+        state: {
+          status: "completed",
+          title: "subagent-data.ts",
+          input: { filePath: "/tmp/src/cli/cmd/run/subagent-data.ts" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("read")
+    expect(formatSubagentCurrentTool("read", tools[1].state)).toBe("Read subagent-data.ts")
   })
 
   test("keeps background state attached to the subagent identity", () => {

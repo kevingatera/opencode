@@ -18,6 +18,8 @@ import { DiffViewerFileTree } from "./diff-viewer-file-tree"
 import { Panel, PanelGroup, Separator } from "./diff-viewer-ui"
 import { DialogSelect } from "../../ui/dialog-select"
 import { getScrollAcceleration } from "../../util/scroll"
+import { resolveDiffView } from "../../util/diff-view"
+import { TuiDiff } from "../../component/tui-diff"
 import {
   allExpandedFileTreeDirectories,
   buildFileTree,
@@ -138,12 +140,7 @@ function DiffViewer(props: { api: TuiPluginApi }) {
   const patchPaneWidth = createMemo(() => dimensions().width - (showFileTree() ? 33 : 0) - 4)
   const patchLeftBorder = createMemo<BorderSides[]>(() => (showFileTree() ? ["left"] : []))
   const splitAvailable = createMemo(() => patchPaneWidth() >= MIN_SPLIT_WIDTH)
-  const defaultView = createMemo(() => {
-    if (props.api.tuiConfig.diff_style === "stacked") return "unified"
-    return splitAvailable() ? "split" : "unified"
-  })
   const [viewOverride, setViewOverride] = createSignal<DiffView | undefined>(storedView(props.api.kv.get(KV_VIEW)))
-  const view = createMemo(() => (splitAvailable() ? (viewOverride() ?? defaultView()) : "unified"))
   const fileTree = createMemo(() => buildFileTree(files()))
   const [expandedFileNodes, setExpandedFileNodes] = createSignal<ReadonlySet<number>>(new Set())
   const [highlightedFileNode, setHighlightedFileNode] = createSignal<number | undefined>()
@@ -332,6 +329,14 @@ function DiffViewer(props: { api: TuiPluginApi }) {
     const file = fileIndex === undefined ? undefined : files()[fileIndex]
     return file && fileIndex !== undefined ? [{ file, fileIndex }] : []
   })
+  const defaultView = createMemo(() => {
+    return resolveDiffView({
+      diffStyle: props.api.tuiConfig.diff_style,
+      width: patchPaneWidth(),
+      minSplitWidth: MIN_SPLIT_WIDTH,
+    })
+  })
+  const view = createMemo(() => (splitAvailable() ? (viewOverride() ?? defaultView()) : "unified"))
 
   const ensureHighlightedPatchFile = () => {
     const fileIndex = currentPatchFileIndex() ?? activePatchFileIndex() ?? firstPatchFileIndex()
@@ -840,10 +845,12 @@ function DiffViewer(props: { api: TuiPluginApi }) {
                             >
                               {(patch) => (
                                 <box border={patchLeftBorder()} borderColor={theme().border}>
-                                  <diff
+                                  <TuiDiff
+                                    id={`diff-viewer-patch-${entry.fileIndex}`}
                                     ref={(element: DiffRenderable) => diffNodeByFileIndex.set(entry.fileIndex, element)}
                                     diff={patch()}
                                     view={view()}
+                                    splitWidth={patchPaneWidth()}
                                     filetype={reviewed() ? PLAIN_TEXT_FILETYPE : filetype(entry.file.file)}
                                     syntaxStyle={themeState.syntax()}
                                     showLineNumbers={true}
@@ -860,6 +867,12 @@ function DiffViewer(props: { api: TuiPluginApi }) {
                                     }
                                     removedLineNumberBg={
                                       reviewed() ? theme().backgroundElement : theme().diffRemovedLineNumberBg
+                                    }
+                                    highlightAddedBg={
+                                      reviewed() ? theme().backgroundElement : theme().diffHighlightAddedBg
+                                    }
+                                    highlightRemovedBg={
+                                      reviewed() ? theme().backgroundElement : theme().diffHighlightRemovedBg
                                     }
                                   />
                                 </box>

@@ -57,6 +57,8 @@ export type Theme = {
   readonly diffHunkHeader: RGBA
   readonly diffHighlightAdded: RGBA
   readonly diffHighlightRemoved: RGBA
+  readonly diffHighlightAddedBg: RGBA
+  readonly diffHighlightRemovedBg: RGBA
   readonly diffAddedBg: RGBA
   readonly diffRemovedBg: RGBA
   readonly diffContextBg: RGBA
@@ -120,9 +122,14 @@ type ColorValue = HexColor | RefName | Variant | RGBA
 export type ThemeJson = {
   $schema?: string
   defs?: Record<string, HexColor | RefName>
-  theme: Omit<Record<ThemeColor, ColorValue>, "selectedListItemText" | "backgroundMenu"> & {
+  theme: Omit<
+    Record<ThemeColor, ColorValue>,
+    "selectedListItemText" | "backgroundMenu" | "diffHighlightAddedBg" | "diffHighlightRemovedBg"
+  > & {
     selectedListItemText?: ColorValue
     backgroundMenu?: ColorValue
+    diffHighlightAddedBg?: ColorValue
+    diffHighlightRemovedBg?: ColorValue
     thinkingOpacity?: number
   }
 }
@@ -265,7 +272,14 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
 
   const resolved = Object.fromEntries(
     Object.entries(theme.theme)
-      .filter(([key]) => key !== "selectedListItemText" && key !== "backgroundMenu" && key !== "thinkingOpacity")
+      .filter(
+        ([key]) =>
+          key !== "selectedListItemText" &&
+          key !== "backgroundMenu" &&
+          key !== "thinkingOpacity" &&
+          key !== "diffHighlightAddedBg" &&
+          key !== "diffHighlightRemovedBg",
+      )
       .map(([key, value]) => {
         return [key, resolveColor(value as ColorValue)]
       }),
@@ -286,6 +300,21 @@ export function resolveTheme(theme: ThemeJson, mode: "dark" | "light") {
     resolved.backgroundMenu = resolveColor(theme.theme.backgroundMenu)
   } else {
     resolved.backgroundMenu = resolved.backgroundElement
+  }
+
+  if (theme.theme.diffHighlightAddedBg !== undefined) {
+    resolved.diffHighlightAddedBg = resolveColor(theme.theme.diffHighlightAddedBg)
+  } else if (resolved.diffAddedBg) {
+    resolved.diffHighlightAddedBg = tint(resolved.diffAddedBg, resolved.diffAdded ?? RGBA.fromHex("#00ff00"), 0.18)
+  }
+  if (theme.theme.diffHighlightRemovedBg !== undefined) {
+    resolved.diffHighlightRemovedBg = resolveColor(theme.theme.diffHighlightRemovedBg)
+  } else if (resolved.diffRemovedBg) {
+    resolved.diffHighlightRemovedBg = tint(
+      resolved.diffRemovedBg,
+      resolved.diffRemoved ?? RGBA.fromHex("#ff0000"),
+      0.18,
+    )
   }
 
   // Handle thinkingOpacity - optional with default of 0.6
@@ -388,11 +417,15 @@ export function generateSystem(colors: TerminalColors, mode: "dark" | "light"): 
   }
 
   const diffAlpha = isDark ? 0.22 : 0.14
+  const diffHighlightAlpha = isDark ? 0.32 : 0.2
   const diffAddedBg = tint(bg, ansiColors.green, diffAlpha)
   const diffRemovedBg = tint(bg, ansiColors.red, diffAlpha)
+  const diffHighlightAddedBg = tint(bg, ansiColors.green, diffHighlightAlpha)
+  const diffHighlightRemovedBg = tint(bg, ansiColors.red, diffHighlightAlpha)
   const diffContextBg = grays[2]
-  const diffAddedLineNumberBg = tint(diffContextBg, ansiColors.green, diffAlpha)
-  const diffRemovedLineNumberBg = tint(diffContextBg, ansiColors.red, diffAlpha)
+  const diffGutterAlpha = isDark ? 0.1 : 0.07
+  const diffAddedLineNumberBg = tint(diffContextBg, ansiColors.green, diffGutterAlpha)
+  const diffRemovedLineNumberBg = tint(diffContextBg, ansiColors.red, diffGutterAlpha)
   const diffLineNumber = textMuted
 
   return {
@@ -431,6 +464,8 @@ export function generateSystem(colors: TerminalColors, mode: "dark" | "light"): 
       diffHunkHeader: grays[7],
       diffHighlightAdded: ansiColors.greenBright,
       diffHighlightRemoved: ansiColors.redBright,
+      diffHighlightAddedBg,
+      diffHighlightRemovedBg,
       diffAddedBg,
       diffRemovedBg,
       diffContextBg,
@@ -616,6 +651,13 @@ function getSyntaxRules(theme: Theme) {
       style: {
         foreground: selectedForeground(theme, theme.warning),
         background: theme.warning,
+        bold: true,
+      },
+    },
+    {
+      scope: ["extmark.command"],
+      style: {
+        foreground: theme.accent,
         bold: true,
       },
     },

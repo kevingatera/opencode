@@ -146,11 +146,11 @@
     },
     "diffAddedLineNumberBg": {
       "dark": "diffGreenBg",
-      "light": "#defbe6"
+      "light": "#9bafa1"
     },
     "diffRemovedLineNumberBg": {
       "dark": "diffRedBg",
-      "light": "#fff1f1"
+      "light": "#b2a8a8"
     },
     "markdownText": {
       "dark": "fg1",
