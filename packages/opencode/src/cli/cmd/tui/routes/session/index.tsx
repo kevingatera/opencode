@@ -1634,7 +1634,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
   return (
     <Show when={!shouldHide()}>
       <Switch>
-        <Match when={props.part.tool === ShellID.ToolID}>
+        <Match when={props.part.tool === ShellID.ToolID || props.part.tool === "shell"}>
           <Shell {...toolprops} />
         </Match>
         <Match when={props.part.tool === "glob"}>
@@ -1645,6 +1645,9 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         </Match>
         <Match when={props.part.tool === "grep"}>
           <Grep {...toolprops} />
+        </Match>
+        <Match when={props.part.tool === "ls"}>
+          <Ls {...toolprops} />
         </Match>
         <Match when={props.part.tool === "webfetch"}>
           <WebFetch {...toolprops} />
@@ -1927,6 +1930,7 @@ function Shell(props: ToolProps<typeof ShellTool>) {
 function Write(props: ToolProps<typeof WriteTool>) {
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  const filePath = createMemo(() => inputFilePath(props.input))
   const code = createMemo(() => {
     if (!props.input.content) return ""
     return props.input.content
@@ -1935,22 +1939,22 @@ function Write(props: ToolProps<typeof WriteTool>) {
   return (
     <Switch>
       <Match when={props.metadata.diagnostics !== undefined}>
-        <BlockTool title={"# Wrote " + pathFormatter.format(props.input.filePath)} part={props.part}>
+        <BlockTool title={"# Wrote " + pathFormatter.format(filePath())} part={props.part}>
           <line_number fg={theme.textMuted} minWidth={3} paddingRight={1}>
             <code
               conceal={false}
               fg={theme.text}
-              filetype={filetype(props.input.filePath!)}
+              filetype={filetype(filePath())}
               syntaxStyle={syntax()}
               content={code()}
             />
           </line_number>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath() ?? ""} />
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing write..." complete={props.input.filePath} part={props.part}>
-          Write {pathFormatter.format(props.input.filePath)}
+        <InlineTool icon="←" pending="Preparing write..." complete={filePath()} part={props.part}>
+          Write {pathFormatter.format(filePath())}
         </InlineTool>
       </Match>
     </Switch>
@@ -1973,6 +1977,7 @@ function Read(props: ToolProps<typeof ReadTool>) {
   const { theme } = useTheme()
   const pathFormatter = usePathFormatter()
   const isRunning = createMemo(() => props.part.state.status === "running")
+  const filePath = createMemo(() => inputFilePath(props.input))
   const loaded = createMemo(() => {
     if (props.part.state.status !== "completed") return []
     if (props.part.state.time.compacted) return []
@@ -1985,11 +1990,11 @@ function Read(props: ToolProps<typeof ReadTool>) {
       <InlineTool
         icon="→"
         pending="Reading file..."
-        complete={props.input.filePath}
+        complete={filePath()}
         spinner={isRunning()}
         part={props.part}
       >
-        Read {pathFormatter.format(props.input.filePath)} {input(props.input, ["filePath"])}
+        Read {pathFormatter.format(filePath())} {input(props.input, ["filePath", "path"])}
       </InlineTool>
       <For each={loaded()}>
         {(filepath) => (
@@ -2012,6 +2017,16 @@ function Grep(props: ToolProps<typeof GrepTool>) {
       <Show when={props.metadata.matches}>
         ({props.metadata.matches} {props.metadata.matches === 1 ? "match" : "matches"})
       </Show>
+    </InlineTool>
+  )
+}
+
+function Ls(props: ToolProps<any>) {
+  const pathFormatter = usePathFormatter()
+  const path = createMemo(() => (props.input as Record<string, any>).path)
+  return (
+    <InlineTool icon="✱" pending="Listing files..." complete={path()} part={props.part}>
+      List {pathFormatter.format(path())}
     </InlineTool>
   )
 }
@@ -2114,6 +2129,7 @@ function Edit(props: ToolProps<typeof EditTool>) {
   const ctx = use()
   const { theme, syntax } = useTheme()
   const pathFormatter = usePathFormatter()
+  const filePath = createMemo(() => inputFilePath(props.input))
 
   const view = createMemo(() => {
     const diffStyle = ctx.tui.diff_style
@@ -2122,14 +2138,14 @@ function Edit(props: ToolProps<typeof EditTool>) {
     return ctx.width > 120 ? "split" : "unified"
   })
 
-  const ft = createMemo(() => filetype(props.input.filePath))
+  const ft = createMemo(() => filetype(filePath()))
 
   const diffContent = createMemo(() => props.metadata.diff)
 
   return (
     <Switch>
       <Match when={props.metadata.diff !== undefined}>
-        <BlockTool title={"← Edit " + pathFormatter.format(props.input.filePath)} part={props.part}>
+        <BlockTool title={"← Edit " + pathFormatter.format(filePath())} part={props.part}>
           <box paddingLeft={1}>
             <diff
               diff={diffContent()}
@@ -2151,12 +2167,12 @@ function Edit(props: ToolProps<typeof EditTool>) {
               removedLineNumberBg={theme.diffRemovedLineNumberBg}
             />
           </box>
-          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={props.input.filePath ?? ""} />
+          <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath() ?? ""} />
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing edit..." complete={props.input.filePath} part={props.part}>
-          Edit {pathFormatter.format(props.input.filePath)} {input({ replaceAll: props.input.replaceAll })}
+        <InlineTool icon="←" pending="Preparing edit..." complete={filePath()} part={props.part}>
+          Edit {pathFormatter.format(filePath())} {input({ replaceAll: props.input.replaceAll })}
         </InlineTool>
       </Match>
     </Switch>
@@ -2332,6 +2348,10 @@ function input(input: Record<string, any>, omit?: string[]): string {
   })
   if (primitives.length === 0) return ""
   return `[${primitives.map(([key, value]) => `${key}=${value}`).join(", ")}]`
+}
+
+function inputFilePath(input: Record<string, any>) {
+  return input.filePath ?? input.path
 }
 
 function filetype(input?: string) {
