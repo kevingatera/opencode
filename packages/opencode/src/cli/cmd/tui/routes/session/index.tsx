@@ -1646,7 +1646,7 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "grep"}>
           <Grep {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "ls"}>
+        <Match when={isListTool(props.part.tool)}>
           <Ls {...toolprops} />
         </Match>
         <Match when={props.part.tool === "webfetch"}>
@@ -1932,8 +1932,7 @@ function Write(props: ToolProps<typeof WriteTool>) {
   const pathFormatter = usePathFormatter()
   const filePath = createMemo(() => inputFilePath(props.input))
   const code = createMemo(() => {
-    if (!props.input.content) return ""
-    return props.input.content
+    return inputString(props.input, "content") ?? inputString(props.input, "file_content") ?? ""
   })
 
   return (
@@ -2380,7 +2379,16 @@ function input(input: Record<string, any>, omit?: string[]): string {
 }
 
 function inputFilePath(input: Record<string, any>) {
-  return input.filePath ?? input.path
+  return inputString(input, "filePath") ?? inputString(input, "path") ?? inputString(input, "file_path")
+}
+
+function inputString(input: Record<string, any>, key: string) {
+  const value = input[key]
+  return typeof value === "string" ? value : undefined
+}
+
+function isListTool(tool: string) {
+  return tool === "ls" || tool === "list" || tool === "list_directory"
 }
 
 function filetype(input?: string) {

@@ -476,7 +476,7 @@ function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: st
       <Match when={name() === "grep"}>
         <Grep {...toolprops} />
       </Match>
-      <Match when={name() === "ls"}>
+      <Match when={isListTool(name())}>
         <Ls {...toolprops} />
       </Match>
       <Match when={name() === "webfetch"}>
@@ -868,7 +868,7 @@ function WebSearch(props: ToolProps) {
 function Write(props: ToolProps) {
   const { theme, syntax } = useTheme()
   const filePath = createMemo(() => inputFilePath(props.input) ?? "")
-  const content = createMemo(() => stringValue(props.input.content) ?? "")
+  const content = createMemo(() => stringValue(props.input.content) ?? stringValue(props.input.file_content) ?? "")
   return (
     <Switch>
       <Match when={content() && props.part.state.status === "completed"}>
@@ -1127,8 +1127,12 @@ function toolName(part: SessionMessageAssistantTool) {
   return stringValue(value.name) ?? stringValue(value.tool) ?? ""
 }
 
+function isListTool(name: string) {
+  return name === "ls" || name === "list" || name === "list_directory"
+}
+
 function inputFilePath(input: Record<string, unknown>) {
-  return stringValue(input.filePath) ?? stringValue(input.path)
+  return stringValue(input.filePath) ?? stringValue(input.path) ?? stringValue(input.file_path)
 }
 
 function pendingInput(part: SessionMessageAssistantTool) {
