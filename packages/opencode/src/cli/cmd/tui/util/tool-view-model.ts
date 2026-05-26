@@ -1,4 +1,5 @@
 import type { ToolFileContent, ToolTextContent } from "@opencode-ai/sdk/v2"
+import { createTwoFilesPatch } from "diff"
 
 export type ToolViewModel = {
   name: string
@@ -22,6 +23,7 @@ export function toolViewModel(input: {
   content?: Array<ToolTextContent | ToolFileContent>
 }): ToolViewModel {
   const toolInput = inputRecord(input.input)
+  const metadata = recordValue(input.metadata)
   const name =
     stringValue(input.name) ??
     stringValue(input.part?.name) ??
@@ -31,7 +33,7 @@ export function toolViewModel(input: {
   return {
     name,
     input: toolInput,
-    metadata: recordValue(input.metadata),
+    metadata: normalizeMetadata(name, toolInput, metadata),
     output: stringValue(input.output) ?? toolContentOutput(input.content),
     filePath: filePathValue(toolInput),
     content: stringValue(toolInput.content) ?? stringValue(toolInput.file_content),
@@ -47,6 +49,24 @@ function inputRecord(input: unknown) {
 function recordValue(input: unknown) {
   if (isRecord(input)) return input
   return {}
+}
+
+function normalizeMetadata(name: string, input: Record<string, unknown>, metadata: Record<string, unknown>) {
+  if (name !== "edit") return metadata
+  if (stringValue(metadata.diff)) return metadata
+
+  const filediffPatch = isRecord(metadata.filediff) ? stringValue(metadata.filediff.patch) : undefined
+  const diff = filediffPatch ?? syntheticEditDiff(input)
+  if (!diff) return metadata
+  return { ...metadata, diff }
+}
+
+function syntheticEditDiff(input: Record<string, unknown>) {
+  const oldText = stringValue(input.oldString) ?? stringValue(input.old_string)
+  const newText = stringValue(input.newString) ?? stringValue(input.new_string)
+  const filePath = filePathValue(input)
+  if (oldText === undefined || newText === undefined || !filePath) return undefined
+  return createTwoFilesPatch(filePath, filePath, oldText, newText)
 }
 
 function toolContentOutput(content?: Array<ToolTextContent | ToolFileContent>) {
