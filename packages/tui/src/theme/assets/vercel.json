@@ -142,12 +142,12 @@
       "light": "textMuted"
     },
     "diffAddedLineNumberBg": {
-      "dark": "#0F2613",
-      "light": "#D6F5D6"
+      "dark": "#09180c",
+      "light": "#E6F9E9"
     },
     "diffRemovedLineNumberBg": {
-      "dark": "#3C1618",
-      "light": "#FFE5E5"
+      "dark": "#231011",
+      "light": "#FDECED"
     },
     "markdownText": {
       "dark": "gray1000",

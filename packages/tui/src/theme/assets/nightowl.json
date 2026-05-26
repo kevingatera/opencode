@@ -118,12 +118,12 @@
       "light": "#7791a6"
     },
     "diffAddedLineNumberBg": {
-      "dark": "#0a2e1a",
-      "light": "#0a2e1a"
+      "dark": "#072012",
+      "light": "#072012"
     },
     "diffRemovedLineNumberBg": {
-      "dark": "#2d1b1b",
-      "light": "#2d1b1b"
+      "dark": "#1f1212",
+      "light": "#1f1212"
     },
     "markdownText": {
       "dark": "nightOwlFg",

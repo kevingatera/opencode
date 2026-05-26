@@ -16,6 +16,8 @@ import { getScrollAcceleration } from "../../util/scroll"
 import { useTuiConfig } from "../../config"
 import { OPENCODE_BASE_MODE, useBindings, useCommandShortcut } from "../../keymap"
 import { usePathFormatter } from "../../context/path-format"
+import { resolveDiffView } from "../../util/diff-view"
+import { TuiDiff } from "../../component/tui-diff"
 
 type PermissionStage = "permission" | "always" | "reject"
 
@@ -36,9 +38,10 @@ function EditBody(props: { request: PermissionRequest }) {
   })
 
   const view = createMemo(() => {
-    const diffStyle = config.diff_style
-    if (diffStyle === "stacked") return "unified"
-    return dimensions().width > 120 ? "split" : "unified"
+    return resolveDiffView({
+      diffStyle: config.diff_style,
+      width: dimensions().width,
+    })
   })
 
   const ft = createMemo(() => filetype(filepath()))
@@ -57,9 +60,10 @@ function EditBody(props: { request: PermissionRequest }) {
             },
           }}
         >
-          <diff
+          <TuiDiff
             diff={diff()}
             view={view()}
+            splitWidth={dimensions().width - 2}
             filetype={ft()}
             syntaxStyle={syntax()}
             showLineNumbers={true}
@@ -75,6 +79,8 @@ function EditBody(props: { request: PermissionRequest }) {
             lineNumberBg={theme.diffContextBg}
             addedLineNumberBg={theme.diffAddedLineNumberBg}
             removedLineNumberBg={theme.diffRemovedLineNumberBg}
+            highlightAddedBg={theme.diffHighlightAddedBg}
+            highlightRemovedBg={theme.diffHighlightRemovedBg}
           />
         </scrollbox>
       </Show>

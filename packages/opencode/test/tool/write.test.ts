@@ -168,6 +168,8 @@ describe("tool.write", () => {
 
         expect(result.metadata).toHaveProperty("filepath", filepath)
         expect(result.metadata).toHaveProperty("exists", true)
+        expect(result.metadata.diff).toContain("-old")
+        expect(result.metadata.diff).toContain("+new")
       }),
     )
   })

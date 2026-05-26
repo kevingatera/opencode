@@ -115,12 +115,12 @@
       "light": "#6a6a6a"
     },
     "diffAddedLineNumberBg": {
-      "dark": "#0d2818",
-      "light": "#e8f5e8"
+      "dark": "#091c10",
+      "light": "#a2aba2"
     },
     "diffRemovedLineNumberBg": {
-      "dark": "#281a1a",
-      "light": "#f5e8e8"
+      "dark": "#1c1212",
+      "light": "#aba2a2"
     },
     "markdownText": {
       "dark": "vesperFg",

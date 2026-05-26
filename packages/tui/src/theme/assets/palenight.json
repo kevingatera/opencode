@@ -119,12 +119,12 @@
       "light": "#6a6e70"
     },
     "diffAddedLineNumberBg": {
-      "dark": "#2e3c2b",
-      "light": "#e8f5e9"
+      "dark": "#202a1e",
+      "light": "#a2aba3"
     },
     "diffRemovedLineNumberBg": {
-      "dark": "#3c2b2b",
-      "light": "#ffebee"
+      "dark": "#2a1e1e",
+      "light": "#b2a4a6"
     },
     "markdownText": {
       "dark": "foreground",

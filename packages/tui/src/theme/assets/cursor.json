@@ -146,12 +146,12 @@
       "light": "textMuted"
     },
     "diffAddedLineNumberBg": {
-      "dark": "#3fa26633",
-      "light": "#1f8a651f"
+      "dark": "#3fa26614",
+      "light": "#1f8a650c"
     },
     "diffRemovedLineNumberBg": {
-      "dark": "#b8004933",
-      "light": "#cf2d5614"
+      "dark": "#b8004914",
+      "light": "#cf2d560a"
     },
     "markdownText": {
       "dark": "darkFg",
@@ -244,6 +244,14 @@
     "syntaxPunctuation": {
       "dark": "darkFg",
       "light": "lightFg"
+    },
+    "diffHighlightAddedBg": {
+      "dark": "#3fa26650",
+      "light": "#1f8a6530"
+    },
+    "diffHighlightRemovedBg": {
+      "dark": "#b8004950",
+      "light": "#cf2d5628"
     }
   }
 }
