@@ -810,11 +810,40 @@ function Grep(props: ToolProps) {
 }
 
 function Ls(props: ToolProps) {
+  const { theme } = useTheme()
+  const dimensions = useTerminalDimensions()
   const path = createMemo(() => stringValue(props.input.path) ?? pendingInput(props.part))
+  const output = createMemo(() => props.output?.trim() ?? "")
+  const [expanded, setExpanded] = createSignal(false)
+  const maxLines = 10
+  const maxChars = createMemo(() => maxLines * Math.max(20, dimensions().width - 6))
+  const collapsed = createMemo(() => collapseToolOutput(output(), maxLines, maxChars()))
+  const limited = createMemo(() => {
+    if (expanded() || !collapsed().overflow) return output()
+    return collapsed().output
+  })
   return (
-    <InlineTool icon="✱" pending="Listing files..." complete={toolComplete(props.part)} part={props.part}>
-      List {normalizePath(path())}
-    </InlineTool>
+    <Switch>
+      <Match when={output()}>
+        <BlockTool
+          title={"✱ List " + normalizePath(path())}
+          part={props.part}
+          onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
+        >
+          <box gap={1}>
+            <text fg={theme.text}>{limited()}</text>
+            <Show when={collapsed().overflow}>
+              <text fg={theme.textMuted}>{expanded() ? "Click to collapse" : "Click to expand"}</text>
+            </Show>
+          </box>
+        </BlockTool>
+      </Match>
+      <Match when={true}>
+        <InlineTool icon="✱" pending="Listing files..." complete={toolComplete(props.part)} part={props.part}>
+          List {normalizePath(path())}
+        </InlineTool>
+      </Match>
+    </Switch>
   )
 }
 
