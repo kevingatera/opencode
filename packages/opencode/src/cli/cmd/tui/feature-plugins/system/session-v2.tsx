@@ -448,6 +448,7 @@ function CollapsedReasoningText(props: { title: string | null }) {
 
 function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: string }) {
   const input = createMemo(() => toolInputRecord(props.part.state.input))
+  const name = createMemo(() => toolName(props.part))
   const toolprops = {
     get input() {
       return input()
@@ -463,43 +464,46 @@ function AssistantTool(props: { part: SessionMessageAssistantTool; sessionID: st
   }
   return (
     <Switch>
-      <Match when={props.part.name === "bash"}>
+      <Match when={name() === "bash" || name() === "shell"}>
         <Bash {...toolprops} />
       </Match>
-      <Match when={props.part.name === "glob"}>
+      <Match when={name() === "glob"}>
         <Glob {...toolprops} />
       </Match>
-      <Match when={props.part.name === "read"}>
+      <Match when={name() === "read"}>
         <Read {...toolprops} />
       </Match>
-      <Match when={props.part.name === "grep"}>
+      <Match when={name() === "grep"}>
         <Grep {...toolprops} />
       </Match>
-      <Match when={props.part.name === "webfetch"}>
+      <Match when={name() === "ls"}>
+        <Ls {...toolprops} />
+      </Match>
+      <Match when={name() === "webfetch"}>
         <WebFetch {...toolprops} />
       </Match>
-      <Match when={props.part.name === "websearch"}>
+      <Match when={name() === "websearch"}>
         <WebSearch {...toolprops} />
       </Match>
-      <Match when={props.part.name === "write"}>
+      <Match when={name() === "write"}>
         <Write {...toolprops} />
       </Match>
-      <Match when={props.part.name === "edit"}>
+      <Match when={name() === "edit"}>
         <Edit {...toolprops} />
       </Match>
-      <Match when={props.part.name === "apply_patch"}>
+      <Match when={name() === "apply_patch"}>
         <ApplyPatch {...toolprops} />
       </Match>
-      <Match when={props.part.name === "todowrite"}>
+      <Match when={name() === "todowrite"}>
         <TodoWrite {...toolprops} />
       </Match>
-      <Match when={props.part.name === "question"}>
+      <Match when={name() === "question"}>
         <Question {...toolprops} />
       </Match>
-      <Match when={props.part.name === "skill"}>
+      <Match when={name() === "skill"}>
         <Skill {...toolprops} />
       </Match>
-      <Match when={props.part.name === "task"}>
+      <Match when={name() === "task"}>
         <Task {...toolprops} />
       </Match>
       <Match when={true}>
@@ -534,12 +538,12 @@ function GenericTool(props: ToolProps) {
       when={output()}
       fallback={
         <InlineTool icon="⚙" pending="Writing command..." complete={toolComplete(props.part)} part={props.part}>
-          {props.part.name} {input(props.input)}
+          {toolName(props.part)} {input(props.input)}
         </InlineTool>
       }
     >
       <BlockTool
-        title={`# ${props.part.name} ${input(props.input)}`}
+        title={`# ${toolName(props.part)} ${input(props.input)}`}
         part={props.part}
         onClick={collapsed().overflow ? () => setExpanded((prev) => !prev) : undefined}
       >
@@ -761,6 +765,7 @@ function Glob(props: ToolProps) {
 
 function Read(props: ToolProps) {
   const { theme } = useTheme()
+  const filePath = createMemo(() => inputFilePath(props.input) ?? pendingInput(props.part))
   const loaded = createMemo(() =>
     arrayValue(props.metadata.loaded).filter((item): item is string => typeof item === "string"),
   )
@@ -769,12 +774,11 @@ function Read(props: ToolProps) {
       <InlineTool
         icon="→"
         pending="Reading file..."
-        complete={stringValue(props.input.filePath) ?? pendingInput(props.part)}
+        complete={filePath()}
         spinner={props.part.state.status === "running"}
         part={props.part}
       >
-        Read {normalizePath(stringValue(props.input.filePath) ?? pendingInput(props.part))}{" "}
-        {input(props.input, ["filePath"])}
+        Read {normalizePath(filePath())} {input(props.input, ["filePath", "path"])}
       </InlineTool>
       <For each={loaded()}>
         {(filepath) => (
@@ -805,6 +809,15 @@ function Grep(props: ToolProps) {
   )
 }
 
+function Ls(props: ToolProps) {
+  const path = createMemo(() => stringValue(props.input.path) ?? pendingInput(props.part))
+  return (
+    <InlineTool icon="✱" pending="Listing files..." complete={toolComplete(props.part)} part={props.part}>
+      List {normalizePath(path())}
+    </InlineTool>
+  )
+}
+
 function WebFetch(props: ToolProps) {
   return (
     <InlineTool icon="%" pending="Fetching from the web..." complete={toolComplete(props.part)} part={props.part}>
@@ -825,7 +838,7 @@ function WebSearch(props: ToolProps) {
 
 function Write(props: ToolProps) {
   const { theme, syntax } = useTheme()
-  const filePath = createMemo(() => stringValue(props.input.filePath) ?? "")
+  const filePath = createMemo(() => inputFilePath(props.input) ?? "")
   const content = createMemo(() => stringValue(props.input.content) ?? "")
   return (
     <Switch>
@@ -855,7 +868,7 @@ function Write(props: ToolProps) {
 function Edit(props: ToolProps) {
   const { theme, syntax } = useTheme()
   const dimensions = useTerminalDimensions()
-  const filePath = createMemo(() => stringValue(props.input.filePath) ?? "")
+  const filePath = createMemo(() => inputFilePath(props.input) ?? "")
   const diff = createMemo(() => stringValue(props.metadata.diff))
   return (
     <Switch>
@@ -1078,6 +1091,15 @@ function toolOutput(content?: Array<ToolTextContent | ToolFileContent>) {
 function toolInputRecord(input: string | Record<string, unknown>) {
   if (typeof input === "string") return {}
   return input
+}
+
+function toolName(part: SessionMessageAssistantTool) {
+  const value = part as SessionMessageAssistantTool & { tool?: unknown }
+  return stringValue(value.name) ?? stringValue(value.tool) ?? ""
+}
+
+function inputFilePath(input: Record<string, unknown>) {
+  return stringValue(input.filePath) ?? stringValue(input.path)
 }
 
 function pendingInput(part: SessionMessageAssistantTool) {
