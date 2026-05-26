@@ -234,6 +234,46 @@ describe("Project.fromDirectory", () => {
       ).toBe(remoteID)
     }),
   )
+
+  it.live("migrates same-worktree project data when the previous ID cache is missing", () =>
+    Effect.gen(function* () {
+      const { db } = yield* Database.Service
+      const tmp = yield* tmpdirScoped({ git: true })
+      const projects = yield* Project.Service
+      const { project: rootProject } = yield* projects.fromDirectory(tmp)
+      const remoteID = remoteProjectID("github.com/acme/missing-cache")
+      const sessionID = crypto.randomUUID() as SessionID
+
+      yield* db
+        .insert(SessionTable)
+        .values({
+          id: sessionID,
+          project_id: rootProject.id,
+          slug: sessionID,
+          directory: tmp,
+          title: "legacy session",
+          version: "0.0.0-test",
+          time_created: Date.now(),
+          time_updated: Date.now(),
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      yield* Effect.promise(() => Bun.file(path.join(tmp, ".git", "opencode")).delete())
+      yield* Effect.promise(() => $`git remote add origin git@github.com:acme/missing-cache.git`.cwd(tmp).quiet())
+
+      const { project } = yield* projects.fromDirectory(tmp)
+
+      expect(project.id).toBe(remoteID)
+      expect(
+        yield* db.select().from(ProjectTable).where(eq(ProjectTable.id, rootProject.id)).get().pipe(Effect.orDie),
+      ).toBeUndefined()
+      expect(
+        (yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie))
+          ?.project_id,
+      ).toBe(remoteID)
+    }),
+  )
 })
 
 describe("Project.fromDirectory git failure paths", () => {
