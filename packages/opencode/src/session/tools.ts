@@ -18,6 +18,7 @@ import { MessageV2 } from "./message-v2"
 import { Session } from "./session"
 import { SessionProcessor } from "./processor"
 import { PartID } from "./schema"
+import { BashSearch } from "@opencode-ai/core/tool/bash-search"
 import { EffectBridge } from "@/effect/bridge"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
@@ -37,6 +38,75 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/png",
   "image/webp",
 ])
+
+const recentTaskSessions = (messages: SessionV1.WithParts[]) => {
+  const seen = new Set<string>()
+  const tasks = messages
+    .toReversed()
+    .flatMap((message) => message.parts)
+    .map((part) => {
+      if (part.type !== "tool" || part.tool !== "task") return
+      const metadata = "metadata" in part.state ? part.state.metadata : undefined
+      if (typeof metadata?.sessionId !== "string") return
+      const input = part.state.input
+      return {
+        sessionID: metadata.sessionId,
+        status: part.state.status,
+        type: typeof input.subagent_type === "string" ? input.subagent_type : "unknown",
+        description: typeof input.description === "string" ? input.description : undefined,
+      }
+    })
+    .filter((task): task is NonNullable<typeof task> => {
+      if (!task || seen.has(task.sessionID)) return false
+      seen.add(task.sessionID)
+      return true
+    })
+    .slice(0, 8)
+
+  if (tasks.length === 0) return
+  return [
+    "Recent task sessions available for task_id follow-ups:",
+    ...tasks.map(
+      (task) =>
+        `- task_id: ${task.sessionID}; subagent_type: ${task.type}; status: ${task.status}${
+          task.description ? `; description: ${task.description}` : ""
+        }`,
+    ),
+  ].join("\n")
+}
+
+const bashArgs = (toolID: string, args: Record<string, unknown>, directory: string) => {
+  if (toolID !== "bash") return args
+  if (typeof args.workdir === "string" && args.workdir.trim()) return args
+  if (typeof args.cwd === "string" && args.cwd.trim()) return args
+  return { ...args, workdir: directory }
+}
+
+const addBashSearchWarning = (
+  toolID: string,
+  args: Record<string, unknown>,
+  result: {
+    title: string
+    metadata: Record<string, unknown>
+    output: string
+    attachments?: Omit<SessionV1.FilePart, "id" | "sessionID" | "messageID">[]
+  },
+) => {
+  if (toolID !== "bash" || typeof args.command !== "string") return result
+  const shaped = BashSearch.shapeOutput(args.command, result.output)
+  if (shaped.warnings.length === 0) return result
+  const existingWarnings = Array.isArray(result.metadata.warnings) ? result.metadata.warnings : []
+  return {
+    ...result,
+    metadata: {
+      ...result.metadata,
+      output: shaped.output,
+      warnings: [...existingWarnings, ...shaped.warnings],
+      ...(shaped.truncated ? { bashSearchOutputTruncated: true, bashSearchOmittedLines: shaped.omittedLines } : {}),
+    },
+    output: shaped.output,
+  }
+}
 
 export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
   agent: Agent.Info
@@ -96,22 +166,28 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     permission: input.session.permission,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
+    const description =
+      item.id === "task"
+        ? [item.description, recentTaskSessions(input.messages)].filter(Boolean).join("\n\n")
+        : item.description
     tools[item.id] = tool({
-      description: item.description,
+      description,
       inputSchema: jsonSchema(schema),
       execute(args, options) {
         return run.promise(
           Effect.gen(function* () {
-            const ctx = context(args, options)
+            const resolvedArgs = bashArgs(item.id, args, input.session.directory)
+            const ctx = context(resolvedArgs, options)
             yield* plugin.trigger(
               "tool.execute.before",
               { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID },
-              { args },
+              { args: resolvedArgs },
             )
-            const result = yield* item.execute(args, ctx)
+            const result = yield* item.execute(resolvedArgs, ctx)
+            const warned = addBashSearchWarning(item.id, resolvedArgs, result)
             const output = {
-              ...result,
-              attachments: result.attachments?.map((attachment) => ({
+              ...warned,
+              attachments: warned.attachments?.map((attachment) => ({
                 ...attachment,
                 id: PartID.ascending(),
                 sessionID: ctx.sessionID,
@@ -120,7 +196,7 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
             }
             yield* plugin.trigger(
               "tool.execute.after",
-              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args },
+              { tool: item.id, sessionID: ctx.sessionID, callID: ctx.callID, args: resolvedArgs },
               output,
             )
             if (options.abortSignal?.aborted) {

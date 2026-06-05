@@ -303,6 +303,25 @@ function providerCfg(url: string) {
   }
 }
 
+noLLMServer.instance("prompt without agent preserves the child session agent", () =>
+  Effect.gen(function* () {
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const parent = yield* sessions.create({ title: "Parent", agent: "build" })
+    const child = yield* sessions.create({ parentID: parent.id, title: "Child task", agent: "general" })
+
+    const message = yield* prompt.prompt({
+      sessionID: child.id,
+      noReply: true,
+      model: ref,
+      parts: [{ type: "text", text: "continue child" }],
+    })
+
+    expect(message.info.role).toBe("user")
+    if (message.info.role === "user") expect(message.info.agent).toBe("general")
+  }),
+)
+
 const writeText = Effect.fn("test.writeText")(function* (file: string, text: string) {
   const fs = yield* FSUtil.Service
   yield* fs.writeWithDirs(file, text)
@@ -588,6 +607,53 @@ it.instance("legacy prompt emits message events without session.next events", ()
   }),
 )
 
+it.instance("loop suppresses streamed textual tool protocol leaks", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const events = yield* EventV2Bridge.Service
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    const deltas: string[] = []
+    const off = yield* events.listen((event) => {
+      if (event.type !== MessageV2.Event.PartDelta.type) return Effect.void
+      const data = event.data as typeof MessageV2.Event.PartDelta.data.Type
+      if (data.sessionID === chat.id && data.field === "text") deltas.push(data.delta)
+      return Effect.void
+    })
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* llm.push(
+      reply()
+        .text("Safe prefix.")
+        .text("Tool res")
+        .text("ult 3 todos:\n[]\n<function")
+        .text("_calls>")
+        .stop()
+        .item(),
+    )
+
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    yield* off
+
+    const liveText = deltas.join("")
+    expect(liveText).toBe("Safe prefix.")
+    expect(liveText).not.toContain("Tool result")
+    expect(liveText).not.toContain("<function_calls>")
+    expect(result.parts.some((part) => part.type === "text" && part.text === "Safe prefix.")).toBe(true)
+    expect(JSON.stringify(result.parts)).not.toContain("Tool result")
+    expect(JSON.stringify(result.parts)).not.toContain("<function_calls>")
+  }),
+)
+
 it.instance("loop surfaces content-filter finishes as session errors", () =>
   Effect.gen(function* () {
     const { llm } = yield* useServerConfig(providerCfg)
@@ -810,6 +876,76 @@ it.instance("loop continues when finish is tool-calls", () =>
   }),
 )
 
+it.instance("subagent follow-up prompts do not inject routing reminder text", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const session = yield* sessions.create({
+      title: "Pinned",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    const child = yield* sessions.create({ parentID: session.id, title: "Compaction audit", agent: "general" })
+    const firstUser = yield* user(session.id, "launch subagent")
+    const assistant: SessionV1.Assistant = {
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: firstUser.id,
+      sessionID: session.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+      finish: "tool-calls",
+    }
+    yield* sessions.updateMessage(assistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: assistant.id,
+      sessionID: session.id,
+      type: "tool",
+      callID: "call_task",
+      tool: "task",
+      state: {
+        status: "completed",
+        input: {
+          description: "audit compaction",
+          subagent_type: "general",
+          prompt: "audit compaction package",
+        },
+        output: `<task id="${child.id}" state="running"></task>`,
+        title: "audit compaction",
+        metadata: {
+          parentSessionId: session.id,
+          sessionId: child.id,
+        },
+        time: { start: Date.now(), end: Date.now() },
+      },
+    })
+
+    yield* prompt.prompt({
+      sessionID: session.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "Continue and also resume in subagents" }],
+    })
+    yield* llm.text("ok")
+    yield* prompt.loop({ sessionID: session.id })
+
+    const inputs = JSON.stringify(yield* llm.inputs)
+    expect(inputs).toContain("Continue and also resume in subagents")
+    expect(inputs).toContain(`task_id: ${child.id}`)
+    expect(inputs).toContain("Recent task sessions available for task_id follow-ups")
+    expect(inputs).not.toContain("subagent-follow-up-routing")
+    expect(inputs).not.toContain("Before any other tool call, call the task tool")
+    expect(inputs).not.toContain("your next assistant action must be task tool call")
+  }),
+)
+
 it.instance("glob tool keeps instance context during prompt runs", () =>
   Effect.gen(function* () {
     const { dir, llm } = yield* useServerConfig(providerCfg)
@@ -918,6 +1054,203 @@ it.instance("failed subtask preserves metadata on error tool state", () =>
       providerID: ProviderV2.ID.make("test"),
       modelID: ModelV2.ID.make("missing-model"),
     })
+  }),
+)
+
+it.instance("wakes parent from completed child task result and ignores reverted parent messages", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const parent = yield* sessions.create({ title: "Parent", agent: "build" })
+    const child = yield* sessions.create({ parentID: parent.id, title: "Child task", agent: "general" })
+
+    const parentUser = yield* user(parent.id, "launch child")
+    const parentAssistant = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: parentUser.id,
+      sessionID: parent.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+      finish: "tool-calls",
+    } satisfies SessionV1.Assistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: parentAssistant.id,
+      sessionID: parent.id,
+      type: "tool",
+      callID: "call-child",
+      tool: "task",
+      state: {
+        status: "running",
+        input: {
+          description: "inspect child",
+          prompt: "inspect child",
+          subagent_type: "general",
+        },
+        title: "inspect child",
+        metadata: {
+          parentSessionId: parent.id,
+          sessionId: child.id,
+        },
+        time: { start: Date.now() },
+      },
+    } satisfies SessionV1.ToolPart)
+
+    const undone = yield* user(parent.id, "this prompt was undone")
+    yield* sessions.setRevert({
+      sessionID: parent.id,
+      revert: { messageID: undone.id },
+      summary: { additions: 0, deletions: 0, files: 0 },
+    })
+
+    const childUser = yield* user(child.id, "direct child continue")
+    const childAssistant = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: childUser.id,
+      sessionID: child.id,
+      mode: "general",
+      agent: "general",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+      finish: "stop",
+    } satisfies SessionV1.Assistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: childAssistant.id,
+      sessionID: child.id,
+      type: "text",
+      text: "child finished after restart",
+    })
+
+    yield* llm.text("parent continued")
+    yield* prompt.loop({ sessionID: child.id })
+
+    yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const parentMessages = yield* sessions.messages({ sessionID: parent.id })
+        const task = parentMessages
+          .flatMap((message) => message.parts)
+          .find((part): part is CompletedToolPart => part.type === "tool" && part.state.status === "completed")
+        return task?.state.output.includes("child finished after restart") ? task : undefined
+      }),
+      "parent task result was not recovered",
+    )
+
+    const parentMessages = yield* sessions.messages({ sessionID: parent.id })
+    expect(parentMessages.some((message) => message.info.id === undone.id)).toBe(false)
+    expect(
+      parentMessages.some(
+        (message) =>
+          message.info.role === "user" &&
+          message.parts.some((part) => part.type === "text" && part.text.includes("<task_result>")),
+      ),
+    ).toBe(false)
+    const inputs = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const current = JSON.stringify(yield* llm.inputs)
+        return current.includes("child finished after restart") ? current : undefined
+      }),
+      "parent was not woken with recovered task result",
+    )
+    expect(inputs).toContain("child finished after restart")
+    expect(JSON.stringify(yield* llm.inputs)).not.toContain("this prompt was undone")
+  }),
+)
+
+it.instance("marks stale parent task complete on recovery without continuing parent", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const parent = yield* sessions.create({ title: "Parent", agent: "build" })
+    const child = yield* sessions.create({ parentID: parent.id, title: "Child task", agent: "general" })
+
+    const parentUser = yield* user(parent.id, "launch child")
+    const parentAssistant = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: parentUser.id,
+      sessionID: parent.id,
+      mode: "build",
+      agent: "build",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+      finish: "tool-calls",
+    } satisfies SessionV1.Assistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: parentAssistant.id,
+      sessionID: parent.id,
+      type: "tool",
+      callID: "call-child",
+      tool: "task",
+      state: {
+        status: "running",
+        input: {
+          description: "inspect child",
+          prompt: "inspect child",
+          subagent_type: "general",
+        },
+        title: "inspect child",
+        metadata: {
+          parentSessionId: parent.id,
+          sessionId: child.id,
+        },
+        time: { start: Date.now() },
+      },
+    } satisfies SessionV1.ToolPart)
+
+    const childUser = yield* user(child.id, "direct child continue")
+    const childAssistant = yield* sessions.updateMessage({
+      id: MessageID.ascending(),
+      role: "assistant",
+      parentID: childUser.id,
+      sessionID: child.id,
+      mode: "general",
+      agent: "general",
+      cost: 0,
+      path: { cwd: "/tmp", root: "/tmp" },
+      tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+      modelID: ref.modelID,
+      providerID: ref.providerID,
+      time: { created: Date.now() },
+      finish: "stop",
+    } satisfies SessionV1.Assistant)
+    yield* sessions.updatePart({
+      id: PartID.ascending(),
+      messageID: childAssistant.id,
+      sessionID: child.id,
+      type: "text",
+      text: "child already finished before open",
+    })
+
+    yield* prompt.recover(parent.id)
+
+    const parentMessages = yield* sessions.messages({ sessionID: parent.id })
+    const task = parentMessages
+      .flatMap((message) => message.parts)
+      .find((part): part is CompletedToolPart => part.type === "tool" && part.state.status === "completed")
+    expect(task?.state.output).toContain("child already finished before open")
+    expect(task?.state.metadata?.recovered).toBe(true)
+    expect(JSON.stringify(parentMessages)).toContain("child already finished before open")
+    expect(yield* llm.calls).toBe(0)
   }),
 )
 
