@@ -44,7 +44,7 @@ import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { TaskTool, type TaskPromptOps } from "@/tool/task"
+import { TaskTool, renderTaskOutput, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
@@ -103,6 +103,7 @@ export interface Interface {
   readonly cancel: (sessionID: SessionID) => Effect.Effect<void>
   readonly prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
+  readonly recover: (sessionID: SessionID) => Effect.Effect<void>
   readonly shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError>
   readonly command: (input: CommandInput) => Effect.Effect<SessionV1.WithParts, Image.Error>
   readonly resolvePromptParts: (template: string) => Effect.Effect<PromptInput["parts"]>
@@ -633,7 +634,15 @@ const layer = Layer.effect(
     })
 
     const createUserMessage = Effect.fn("SessionPrompt.createUserMessage")(function* (input: PromptInput) {
-      const agentName = input.agent
+      // Prefer the session's stored agent when the prompt omits one so child
+      // sessions and noReply handoffs do not silently fall back to build.
+      const stored = yield* db
+        .select({ agent: SessionTable.agent, model: SessionTable.model })
+        .from(SessionTable)
+        .where(eq(SessionTable.id, input.sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      const agentName = input.agent ?? stored?.agent
       const ag = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!ag) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -1049,6 +1058,8 @@ const layer = Layer.effect(
       return { info, parts }
     }, Effect.scoped)
 
+    let loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts>
+
     const prompt: (input: PromptInput) => Effect.Effect<SessionV1.WithParts, Image.Error> = Effect.fn(
       "SessionPrompt.prompt",
     )(function* (input: PromptInput) {
@@ -1078,12 +1089,91 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
+
+    const childTaskResult = (msgs: SessionV1.WithParts[]) => {
+      const assistant = msgs.findLast((message) => message.info.role === "assistant")
+      if (!assistant || assistant.info.role !== "assistant") return
+      if (!assistant.info.finish || assistant.info.finish === "tool-calls") return
+      const text = assistant.parts
+        .filter((part): part is SessionV1.TextPart => part.type === "text")
+        .map((part) => part.text)
+        .join("\n")
+        .trim()
+      if (!text) return
+      return text
+    }
+
+    let wakeRecoveredSession: (sessionID: SessionID) => Effect.Effect<void> = () => Effect.void
+    let recoverParentForChild: (parentID: SessionID, childSessionID: SessionID) => Effect.Effect<void> = () => Effect.void
+
+    const recoverStaleTasks = Effect.fn("SessionPrompt.recoverStaleTasks")(function* (
+      sessionID: SessionID,
+      options?: { wake?: boolean; childSessionID?: SessionID },
+    ) {
+      const msgs = yield* sessions.messages({ sessionID })
+      let recovered = false
+
+      for (const message of msgs) {
+        if (message.info.role !== "assistant") continue
+        for (const part of message.parts) {
+          if (part.type !== "tool" || part.tool !== "task" || part.state.status !== "running") continue
+          const metadata = "metadata" in part.state ? part.state.metadata : undefined
+          if (typeof metadata?.sessionId !== "string") continue
+          const childSessionID = SessionID.make(metadata.sessionId)
+          if (options?.childSessionID && childSessionID !== options.childSessionID) continue
+
+          const childMsgs = yield* sessions.messages({ sessionID: childSessionID })
+          const text = childTaskResult(childMsgs)
+          if (!text) continue
+
+          const description =
+            typeof part.state.input?.description === "string" ? part.state.input.description : "task"
+          const output = renderTaskOutput({
+            sessionID: childSessionID,
+            state: "completed",
+            summary: `Recovered task completed: ${description}`,
+            text,
+          })
+
+          const completed = {
+            status: "completed" as const,
+            input: part.state.input,
+            output,
+            title: part.state.title ?? description,
+            metadata: {
+              ...metadata,
+              recovered: true,
+            },
+            time: {
+              ...part.state.time,
+              end: Date.now(),
+            },
+          } satisfies SessionV1.ToolStateCompleted
+          yield* sessions.updatePart({
+            ...part,
+            state: completed,
+          })
+          recovered = true
+        }
+      }
+
+      if (!options?.wake || !recovered) return
+      yield* wakeRecoveredSession(sessionID)
+    })
+
+    const recover = Effect.fn("SessionPrompt.recover")(function* (sessionID: SessionID) {
+      yield* recoverStaleTasks(sessionID).pipe(Effect.orDie)
+    })
+
     const runLoop: (sessionID: SessionID) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.run")(
       function* (sessionID: SessionID) {
         const ctx = yield* InstanceState.context
         let structured: unknown
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        if (session.parentID) {
+          yield* recoverParentForChild(session.parentID, sessionID)
+        }
 
         while (true) {
           yield* status.set(sessionID, { type: "busy" })
@@ -1340,11 +1430,23 @@ const layer = Layer.effect(
       },
     )
 
-    const loop: (input: LoopInput) => Effect.Effect<SessionV1.WithParts> = Effect.fn("SessionPrompt.loop")(function* (
+    loop = Effect.fn("SessionPrompt.loop")(function* (
       input: LoopInput,
     ) {
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
+
+    wakeRecoveredSession = (sessionID) =>
+      Effect.gen(function* () {
+        const parent = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        yield* revert.cleanup(parent)
+        yield* loop({ sessionID }).pipe(Effect.orDie, Effect.forkIn(scope, { startImmediately: true }), Effect.asVoid)
+      })
+
+    recoverParentForChild = (parentID, childSessionID) =>
+      recoverStaleTasks(parentID, { wake: true, childSessionID }).pipe(Effect.orDie, Effect.asVoid)
+
+
 
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
@@ -1484,6 +1586,7 @@ const layer = Layer.effect(
       cancel,
       prompt,
       loop,
+      recover,
       shell,
       command,
       resolvePromptParts,

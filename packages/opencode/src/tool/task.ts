@@ -39,6 +39,16 @@ const BACKGROUND_UPDATED = [
   "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
   "Work on non-overlapping tasks, or briefly tell the user what you sent and end your response.",
 ].join("\n")
+const SIBLING_TASK_MUTATION_DENIES = [
+  { permission: "edit" as const, pattern: "*" as const, action: "deny" as const },
+  { permission: "bash" as const, pattern: "*" as const, action: "deny" as const },
+]
+const SUBAGENT_HANDOFF = [
+  "Subagent handoff:",
+  "- Remember that you are not alone in this codebase. The parent agent and other subagents may be editing files at the same time.",
+  "- Do not revert, overwrite, or clean up changes you did not make. If you notice unexpected diffs, treat them as someone else's in-progress work and adapt around them.",
+  "- Stay within the task's assigned scope. If code changes are requested, keep edits focused and list every changed file in your final response.",
+].join("\n")
 
 const BaseParameterFields = {
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
@@ -46,7 +56,7 @@ const BaseParameterFields = {
   subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
   task_id: Schema.optional(Schema.String).annotate({
     description:
-      "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "Set this to a prior task_id to relay follow-up instructions to the same subagent session instead of creating a fresh one. Use it for commands like continue, also check this, or tell that agent to do X, whether the subagent is running in the background or stopped.",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
 }
@@ -61,7 +71,7 @@ export const Parameters = Schema.Struct({
   }),
 })
 
-function renderOutput(input: {
+export function renderTaskOutput(input: {
   sessionID: SessionID
   state: "running" | "completed" | "error"
   summary?: string
@@ -77,6 +87,40 @@ function renderOutput(input: {
     "</task>",
   ].join("\n")
 }
+
+function normalizeSubagentType(input: string) {
+  if (input === "general-purpose") return "general"
+  return input
+}
+
+function formatSubagentPrompt(input: { prompt: string; taskID: SessionID; resumed: boolean }) {
+  return [
+    SUBAGENT_HANDOFF,
+    `Task session: ${input.taskID}${input.resumed ? " (resumed)" : ""}`,
+    "User task:",
+    input.prompt,
+  ].join("\n\n")
+}
+
+const requireResumableTaskSession = Effect.fn("TaskTool.requireResumableTaskSession")(function* (input: {
+  taskID: string
+  parentID: SessionID
+  subagent: string
+  sessions: Session.Interface
+}) {
+  const session = yield* input.sessions
+    .get(SessionID.make(input.taskID))
+    .pipe(Effect.catchCause(() => Effect.fail(new Error(`Cannot resume unknown task_id: ${input.taskID}`))))
+  if (session.parentID !== input.parentID) {
+    return yield* Effect.fail(new Error(`Cannot resume task_id ${input.taskID}: it is not a child of this session`))
+  }
+  if (session.agent && session.agent !== input.subagent) {
+    return yield* Effect.fail(
+      new Error(`Cannot resume task_id ${input.taskID}: expected ${session.agent}, got ${input.subagent}`),
+    )
+  }
+  return session
+})
 
 export const TaskTool = Tool.define(
   id,
@@ -95,6 +139,7 @@ export const TaskTool = Tool.define(
     ) {
       const cfg = yield* config.get()
       const runInBackground = params.background === true
+      const subagent = normalizeSubagentType(params.subagent_type)
       if (runInBackground && !flags.experimentalBackgroundSubagents) {
         return yield* Effect.fail(
           new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true"),
@@ -119,28 +164,39 @@ export const TaskTool = Tool.define(
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
           permission: id,
-          patterns: [params.subagent_type],
+          patterns: [subagent],
           always: ["*"],
           metadata: {
             description: params.description,
-            subagent_type: params.subagent_type,
+            subagent_type: subagent,
           },
         })
       }
 
-      const next = yield* agent.get(params.subagent_type)
+      const next = yield* agent.get(subagent)
       if (!next) {
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
       const session = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        ? yield* requireResumableTaskSession({
+            taskID: params.task_id,
+            parentID: ctx.sessionID,
+            subagent: next.name,
+            sessions,
+          })
         : undefined
+      const siblingTaskRunning =
+        !session &&
+        (yield* background.list()).some(
+          (job) => job.type === id && job.status === "running" && job.metadata?.parentSessionId === ctx.sessionID,
+        )
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
         subagent: next,
       })
       const childToolDenies = [
+        ...(siblingTaskRunning ? SIBLING_TASK_MUTATION_DENIES : []),
         ...(next.permission.some((rule) => rule.permission === "todowrite")
           ? []
           : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
@@ -186,6 +242,7 @@ export const TaskTool = Tool.define(
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        ...(session ? { resumed: true } : {}),
         ...(runInBackground ? { background: true } : {}),
       }
 
@@ -198,7 +255,13 @@ export const TaskTool = Tool.define(
       if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
-        const parts = yield* ops.resolvePromptParts(params.prompt)
+        const parts = yield* ops.resolvePromptParts(
+          formatSubagentPrompt({
+            prompt: params.prompt,
+            taskID: nextSession.id,
+            resumed: !!session,
+          }),
+        )
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
@@ -238,7 +301,7 @@ export const TaskTool = Tool.define(
               {
                 type: "text",
                 synthetic: true,
-                text: renderOutput({
+                text: renderTaskOutput({
                   sessionID: nextSession.id,
                   state,
                   summary:
@@ -265,6 +328,7 @@ export const TaskTool = Tool.define(
       })
 
       if (yield* background.extend({ id: nextSession.id, run: runTask() })) {
+        yield* background.promote(nextSession.id)
         return {
           title: params.description,
           metadata: {
@@ -272,7 +336,7 @@ export const TaskTool = Tool.define(
             background: true,
             jobId: nextSession.id,
           },
-          output: renderOutput({
+          output: renderTaskOutput({
             sessionID: nextSession.id,
             state: "running",
             summary: "Background task updated",
@@ -304,7 +368,7 @@ export const TaskTool = Tool.define(
             background: true,
             jobId: info.id,
           },
-          output: renderOutput({
+          output: renderTaskOutput({
             sessionID: nextSession.id,
             state: "running",
             summary: "Background task started",
@@ -341,7 +405,7 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata,
-              output: renderOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+              output: renderTaskOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
             }
           }),
         (_, exit) =>
