@@ -84,7 +84,7 @@ import { DialogVariant } from "./component/dialog-variant"
 import { createTuiAttention } from "./attention"
 import * as TuiAudio from "./audio"
 import { win32DisableProcessedInput, win32FlushInputBuffer } from "./terminal-win32"
-import { destroyRenderer } from "./util/renderer"
+import { destroyRenderer, restoreTerminalModes } from "./util/renderer"
 import { cliErrorMessage, errorFormat } from "./util/error"
 
 registerOpencodeSpinner()
@@ -138,6 +138,8 @@ const appBindingCommands = [
   "app.toggle.paste_summary",
   "app.toggle.session_directory_filter",
 ] as const
+
+const terminalTitleSpinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 export type TuiInput = {
   url: string
@@ -232,6 +234,26 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
       yield* Effect.acquireRelease(
         Effect.sync(() => process.on("SIGHUP", onSighup)),
         () => Effect.sync(() => process.off("SIGHUP", onSighup)),
+      )
+      // Safety net: a signal-killed process never runs the renderer finalizer,
+      // which would otherwise leave mouse tracking on and flood the shell with
+      // mouse reports. Restore terminal modes synchronously before exiting.
+      const onTerminate = (signal: NodeJS.Signals) => {
+        destroyRenderer(renderer)
+        process.exit(signal === "SIGINT" ? 130 : 143)
+      }
+      yield* Effect.acquireRelease(
+        Effect.sync(() => {
+          process.on("exit", restoreTerminalModes)
+          process.on("SIGINT", onTerminate)
+          process.on("SIGTERM", onTerminate)
+        }),
+        () =>
+          Effect.sync(() => {
+            process.off("exit", restoreTerminalModes)
+            process.off("SIGINT", onTerminate)
+            process.off("SIGTERM", onTerminate)
+          }),
       )
       renderer.once("destroy", () => Deferred.doneUnsafe(shutdown, Effect.void))
       const pluginRuntime = createPluginRuntime()
@@ -445,9 +467,23 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
     renderer.clearSelection()
   }
   const [terminalTitleEnabled, setTerminalTitleEnabled] = createSignal(kv.get("terminal_title_enabled", true))
+  const [terminalTitleFrame, setTerminalTitleFrame] = createSignal(0)
   const [pasteSummaryEnabled, setPasteSummaryEnabled] = createSignal(
     kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary),
   )
+  const terminalTitleRunning = createMemo(() => {
+    if (route.data.type !== "session") return false
+    return (sync.data.session_status?.[route.data.sessionID] ?? { type: "idle" }).type !== "idle"
+  })
+
+  createEffect(() => {
+    if (!terminalTitleEnabled() || Flag.OPENCODE_DISABLE_TERMINAL_TITLE || !terminalTitleRunning()) return
+
+    const interval = setInterval(() => {
+      setTerminalTitleFrame((frame) => (frame + 1) % terminalTitleSpinnerFrames.length)
+    }, 120)
+    onCleanup(() => clearInterval(interval))
+  })
 
   // Update terminal window title based on current route and session
   createEffect(() => {
@@ -460,13 +496,14 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
 
     if (route.data.type === "session") {
       const session = sync.session.get(route.data.sessionID)
+      const prefix = terminalTitleRunning() ? `${terminalTitleSpinnerFrames[terminalTitleFrame()]} ` : ""
       if (!session || isDefaultTitle(session.title)) {
-        renderer.setTerminalTitle("OpenCode")
+        renderer.setTerminalTitle(`${prefix}OpenCode`)
         return
       }
 
       const title = session.title.length > 40 ? session.title.slice(0, 37) + "..." : session.title
-      renderer.setTerminalTitle(`OC | ${title}`)
+      renderer.setTerminalTitle(`${prefix}OC | ${title}`)
       return
     }
 
