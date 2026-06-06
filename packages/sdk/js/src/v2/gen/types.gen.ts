@@ -1795,6 +1795,7 @@ export type ProviderConfig = {
       }
       experimental?: boolean
       status?: "alpha" | "beta" | "deprecated" | "active"
+      prompt?: string
       provider?: {
         npm?: string
         api?: string
@@ -2101,6 +2102,7 @@ export type Model = {
     [key: string]: string
   }
   release_date: string
+  prompt?: string
   variants?: {
     [key: string]: {
       [key: string]: unknown
@@ -9444,15 +9446,17 @@ export type SessionListData = {
     start?: number
     search?: string
     limit?: number
+    order?: "asc" | "desc"
+    cursor?: string
   }
   url: "/session"
 }
 
 export type SessionListErrors = {
   /**
-   * Bad request
+   * BadRequest | InvalidRequestError
    */
-  400: BadRequestError
+  400: EffectHttpApiErrorBadRequest | InvalidRequestError
 }
 
 export type SessionListError = SessionListErrors[keyof SessionListErrors]
@@ -9757,6 +9761,7 @@ export type SessionMessagesData = {
     directory?: string
     workspace?: string
     limit?: number
+    order?: "asc" | "desc"
     before?: string
   }
   url: "/session/{sessionID}/message"
