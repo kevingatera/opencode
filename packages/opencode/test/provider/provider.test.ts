@@ -455,6 +455,86 @@ it.instance(
 )
 
 it.instance(
+  "custom model prompt is stored on model",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const model = providers[ProviderV2.ID.make("custom-prompt-provider")].models["custom-model"]
+    expect(model.prompt).toBe("You are a custom coding assistant.")
+  }),
+  {
+    config: {
+      provider: {
+        "custom-prompt-provider": {
+          name: "Custom Prompt Provider",
+          npm: "@ai-sdk/openai-compatible",
+          env: [],
+          models: {
+            "custom-model": {
+              name: "Custom Model",
+              tool_call: true,
+              limit: { context: 128000, output: 4096 },
+              prompt: "You are a custom coding assistant.",
+            },
+          },
+          options: { apiKey: "test-key" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "model prompt is undefined when not specified",
+  Effect.gen(function* () {
+    const providers = yield* list
+    const model = providers[ProviderV2.ID.make("no-prompt-provider")].models["no-prompt-model"]
+    expect(model.prompt).toBeUndefined()
+  }),
+  {
+    config: {
+      provider: {
+        "no-prompt-provider": {
+          name: "No Prompt Provider",
+          npm: "@ai-sdk/openai-compatible",
+          env: [],
+          models: {
+            "no-prompt-model": {
+              name: "No Prompt Model",
+              tool_call: true,
+              limit: { context: 128000, output: 4096 },
+            },
+          },
+          options: { apiKey: "test-key" },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
+  "model prompt overrides existing model prompt",
+  Effect.gen(function* () {
+    yield* set("ANTHROPIC_API_KEY", "test-api-key")
+    const providers = yield* list
+    const model = providers[ProviderV2.ID.anthropic].models["claude-sonnet-4-20250514"]
+    expect(model.prompt).toBe("You are a specialized Anthropic assistant.")
+  }),
+  {
+    config: {
+      provider: {
+        anthropic: {
+          models: {
+            "claude-sonnet-4-20250514": {
+              prompt: "You are a specialized Anthropic assistant.",
+            },
+          },
+        },
+      },
+    },
+  },
+)
+
+it.instance(
   "provider removed when all models filtered out",
   Effect.gen(function* () {
     const providers = yield* list

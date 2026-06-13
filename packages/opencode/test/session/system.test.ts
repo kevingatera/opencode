@@ -9,6 +9,8 @@ import type { Provider } from "../../src/provider/provider"
 import { SystemPrompt } from "../../src/session/system"
 import { MCP } from "../../src/mcp"
 import { testEffect } from "../lib/effect"
+import { ModelV2 } from "@opencode-ai/core/model"
+import { ProviderV2 } from "@opencode-ai/core/provider"
 
 const skills: Skill.Info[] = [
   {
@@ -41,6 +43,31 @@ const build: Agent.Info = {
   mode: "primary",
   permission: Permission.fromConfig({ "*": "allow" }),
   options: {},
+}
+
+function makeModel(input: { apiID: string; prompt?: string }): Provider.Model {
+  return {
+    id: ModelV2.ID.make("test-model"),
+    providerID: ProviderV2.ID.make("test-provider"),
+    name: "Test Model",
+    api: { id: input.apiID, url: "", npm: "" },
+    capabilities: {
+      temperature: false,
+      reasoning: false,
+      attachment: false,
+      toolcall: true,
+      input: { text: true, audio: false, image: false, video: false, pdf: false },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 128000, output: 4096 },
+    status: "active",
+    options: {},
+    headers: {},
+    release_date: "2025-01-01",
+    prompt: input.prompt,
+  }
 }
 
 const it = testEffect(
@@ -108,6 +135,25 @@ describe("session.system", () => {
       expect(prompt).toContain("# Prompt and Tool Use")
     }
   })
+
+  it.effect("uses custom model prompt before model-family matching", () =>
+    Effect.gen(function* () {
+      expect(SystemPrompt.provider(makeModel({ apiID: "claude-sonnet-4", prompt: "Custom prompt" }))).toEqual([
+        "Custom prompt",
+      ])
+    }),
+  )
+
+  it.effect("falls back to model-family prompt without custom model prompt", () =>
+    Effect.gen(function* () {
+      const claude = SystemPrompt.provider(makeModel({ apiID: "claude-sonnet-4" }))
+      const fallback = SystemPrompt.provider(makeModel({ apiID: "unknown-local-model" }))
+
+      expect(claude).toHaveLength(1)
+      expect(claude[0]).not.toBe("")
+      expect(claude[0]).not.toBe(fallback[0])
+    }),
+  )
 
   it.effect("skills output is sorted by name and stable across calls", () =>
     Effect.gen(function* () {
