@@ -26,6 +26,7 @@
 //   to the next pending request or to the prompt view.
 import type { Event, Part, PermissionRequest, QuestionRequest, ToolPart } from "@opencode-ai/sdk/v2"
 import * as Locale from "@/util/locale"
+import { MessageV2 } from "@/session/message-v2"
 import { toolView } from "./tool"
 import type { FooterOutput, FooterPatch, FooterView, StreamCommit } from "./types"
 
@@ -1028,7 +1029,7 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
     }
 
     data.part.set(part.id, role === "user" && kind === "assistant" ? "user" : kind)
-    syncText(data, part.id, part.text)
+    syncText(data, part.id, kind === "assistant" ? MessageV2.sanitizeAssistantText(part.text) : part.text)
 
     if (part.time?.end) {
       data.end.add(part.id)

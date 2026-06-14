@@ -849,6 +849,7 @@ export const RunCommand = effectCmd({
             if (result.error) {
               if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
               process.exitCode = 1
+              await events.stream.return?.(undefined)
               return
             }
             await finish()
@@ -866,6 +867,7 @@ export const RunCommand = effectCmd({
           if (result.error) {
             if (!emit("error", { error: result.error })) UI.error(formatRunError(result.error))
             process.exitCode = 1
+            await events.stream.return?.(undefined)
             return
           }
           await finish()

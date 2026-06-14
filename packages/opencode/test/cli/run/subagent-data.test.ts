@@ -49,7 +49,19 @@ function reduce(data: ReturnType<typeof createSubagentData>, event: unknown) {
   })
 }
 
-function taskMessage(sessionID: string, status: "running" | "completed" | "interrupted" = "completed"): SessionMessage {
+function taskMetadata(sessionID: string, resumed?: boolean) {
+  return {
+    sessionId: sessionID,
+    toolcalls: 4,
+    ...(resumed ? { resumed: true } : {}),
+  }
+}
+
+function taskMessage(
+  sessionID: string,
+  status: "running" | "completed" | "interrupted" = "completed",
+  opts: { resumed?: boolean } = {},
+): SessionMessage {
   if (status === "running") {
     return {
       parts: [
@@ -67,10 +79,7 @@ function taskMessage(sessionID: string, status: "running" | "completed" | "inter
               subagent_type: "explore",
             },
             title: "Reducer touchpoints",
-            metadata: {
-              sessionId: sessionID,
-              toolcalls: 4,
-            },
+            metadata: taskMetadata(sessionID, opts.resumed),
             time: { start: 1 },
           },
         },
@@ -96,8 +105,7 @@ function taskMessage(sessionID: string, status: "running" | "completed" | "inter
             },
             error: "Tool execution aborted",
             metadata: {
-              sessionId: sessionID,
-              toolcalls: 4,
+              ...taskMetadata(sessionID, opts.resumed),
               interrupted: true,
             },
             time: { start: 1, end: 2 },
@@ -124,10 +132,7 @@ function taskMessage(sessionID: string, status: "running" | "completed" | "inter
           },
           output: "",
           title: "Reducer touchpoints",
-          metadata: {
-            sessionId: sessionID,
-            toolcalls: 4,
-          },
+          metadata: taskMetadata(sessionID, opts.resumed),
           time: { start: 1, end: 2 },
         },
       },
@@ -277,6 +282,25 @@ describe("run subagent data", () => {
       expect.objectContaining({
         sessionID: "child-1",
         status: "cancelled",
+      }),
+    ])
+  })
+
+  test("marks resumed task tabs during bootstrap", () => {
+    const data = createSubagentData()
+
+    bootstrapSubagentData({
+      data,
+      messages: [taskMessage("child-1", "running", { resumed: true })],
+      children: [{ id: "child-1" }],
+      permissions: [],
+      questions: [],
+    })
+
+    expect(snapshotSubagentData(data).tabs).toEqual([
+      expect.objectContaining({
+        sessionID: "child-1",
+        resumed: true,
       }),
     ])
   })

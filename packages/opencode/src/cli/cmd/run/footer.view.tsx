@@ -110,6 +110,7 @@ type RunFooterViewProps = {
   onLayout: (input: { route: FooterPromptRoute; autocomplete: boolean; subagentRows: number }) => void
   onStatus: (text: string) => void
   onSubagentSelect?: (sessionID: string | undefined) => void
+  onSubagentSubmit: (sessionID: string, prompt: RunPrompt) => boolean
   onQueuedRemove: (messageID: string) => Promise<boolean>
 }
 
@@ -134,10 +135,15 @@ export function RunFooterView(props: RunFooterViewProps) {
   const [subagentMenuRows, setSubagentMenuRows] = createSignal(RUN_SUBAGENT_PANEL_ROWS)
   const queuedPrompts = createMemo(() => props.queuedPrompts?.() ?? [])
   const skills = createMemo(() => (props.commands() ?? []).filter((item) => item.source === "skill"))
-  const prompt = createMemo(() => active().type === "prompt" && route().type === "composer")
+  const prompt = createMemo(
+    () => active().type === "prompt" && (route().type === "composer" || route().type === "subagent-compose"),
+  )
   const selectingSubagent = createMemo(() => active().type === "prompt" && route().type === "subagent-menu")
   const selectingQueued = createMemo(() => active().type === "prompt" && route().type === "queued-menu")
-  const inspecting = createMemo(() => active().type === "prompt" && route().type === "subagent")
+  const inspecting = createMemo(
+    () => active().type === "prompt" && (route().type === "subagent" || route().type === "subagent-compose"),
+  )
+  const composingSubagent = createMemo(() => active().type === "prompt" && route().type === "subagent-compose")
   const commanding = createMemo(() => active().type === "prompt" && route().type === "command")
   const skilling = createMemo(() => active().type === "prompt" && route().type === "skill")
   const modeling = createMemo(() => active().type === "prompt" && route().type === "model")
@@ -155,7 +161,7 @@ export function RunFooterView(props: RunFooterViewProps) {
   )
   const selected = createMemo(() => {
     const current = route()
-    return current.type === "subagent" ? current.sessionID : undefined
+    return current.type === "subagent" || current.type === "subagent-compose" ? current.sessionID : undefined
   })
   const tabs = createMemo(() => subagent().tabs)
   const activeTabs = createMemo(() => tabs().filter((item) => item.status === "running"))
@@ -177,7 +183,9 @@ export function RunFooterView(props: RunFooterViewProps) {
   })
   const detail = createMemo(() => {
     const current = route()
-    return current.type === "subagent" ? subagent().details[current.sessionID] : undefined
+    return current.type === "subagent" || current.type === "subagent-compose"
+      ? subagent().details[current.sessionID]
+      : undefined
   })
   const command = useKeymapSelector(
     (keymap: OpenTuiKeymap) =>
@@ -284,8 +292,32 @@ export function RunFooterView(props: RunFooterViewProps) {
     }
 
     const current = route()
-    return current.type === "composer" ? "prompt" : current.type
+    if (current.type === "composer" || current.type === "subagent-compose") {
+      return "prompt"
+    }
+
+    return current.type
   })
+
+  const submitPrompt = (input: RunPrompt) => {
+    const current = route()
+    if (current.type !== "subagent-compose") {
+      return props.onSubmit(input)
+    }
+
+    const tab = selectedTab()
+    if (!tab) {
+      props.onStatus("subagent not found")
+      return false
+    }
+
+    const sent = props.onSubagentSubmit(tab.sessionID, input)
+    if (sent) {
+      setRoute({ type: "subagent", sessionID: current.sessionID })
+      props.onSubagentSelect?.(current.sessionID)
+    }
+    return sent
+  }
 
   const openCommand = () => {
     setRoute({ type: "command" })
@@ -340,6 +372,17 @@ export function RunFooterView(props: RunFooterViewProps) {
     props.onSubagentSelect?.(undefined)
   }
 
+  const composeTab = () => {
+    const sessionID = selected()
+    if (!sessionID) {
+      return
+    }
+
+    setRoute({ type: "subagent-compose", sessionID })
+    props.onSubagentSelect?.(sessionID)
+    queueMicrotask(() => composer.replaceDraft(""))
+  }
+
   const cycleTab = (dir: -1 | 1) => {
     if (tabs().length === 0) {
       return
@@ -369,12 +412,21 @@ export function RunFooterView(props: RunFooterViewProps) {
     width,
     theme,
     history: props.history,
-    onSubmit: props.onSubmit,
+    onSubmit: submitPrompt,
     onCycle: props.onCycle,
     onInterrupt: props.onInterrupt,
     onEditorOpen: props.onEditorOpen,
     onInputClear: props.onInputClear,
-    onExitRequest: props.onExitRequest,
+    onExitRequest: () => {
+      const current = route()
+      if (current.type === "subagent-compose") {
+        setRoute({ type: "subagent", sessionID: current.sessionID })
+        props.onSubagentSelect?.(current.sessionID)
+        return true
+      }
+
+      return props.onExitRequest?.() ?? false
+    },
     onExit: props.onExit,
     onSkillMenu: openSkillMenu,
     onRows: props.onRows,
@@ -927,7 +979,7 @@ export function RunFooterView(props: RunFooterViewProps) {
           }}
         >
           <RunFooterSubagentBody
-            active={inspecting}
+            active={() => inspecting() && !composingSubagent()}
             theme={runTheme}
             tab={selectedTab}
             index={selectedIndex}
@@ -936,8 +988,33 @@ export function RunFooterView(props: RunFooterViewProps) {
             width={width}
             diffStyle={props.diffStyle}
             onCycle={cycleTab}
+            onCompose={composeTab}
             onClose={closeTab}
           />
+          <Show when={composingSubagent()}>
+            <box width="100%" flexShrink={0} flexDirection="column" backgroundColor={theme().surface}>
+              <box width="100%" height={1} paddingLeft={1} paddingRight={1} flexDirection="row" gap={1}>
+                <text fg={theme().highlight} wrapMode="none" truncate flexShrink={0}>
+                  Instruct
+                </text>
+                <text fg={theme().muted} wrapMode="none" truncate flexGrow={1} flexShrink={1}>
+                  {selectedTab()?.description || selectedTab()?.title || selectedTab()?.label || selected()}
+                </text>
+                <text fg={theme().muted} wrapMode="none" truncate flexShrink={0}>
+                  esc close
+                </text>
+              </box>
+              <RunPromptBody
+                theme={theme}
+                background={() => runTheme().background}
+                placeholder={() => "Send instructions to this subagent..."}
+                onSubmit={composer.onSubmit}
+                onKeyDown={composer.onKeyDown}
+                onContentChange={composer.onContentChange}
+                bind={composer.bind}
+              />
+            </box>
+          </Show>
         </box>
       </Show>
     </box>

@@ -124,6 +124,15 @@ function subagentStatusLabel(status: FooterSubagentTab["status"]) {
   return "running"
 }
 
+function subagentFooter(item: FooterSubagentTab) {
+  const status = subagentStatusLabel(item.status)
+  if (item.resumed) {
+    return `resumed · ${status}`
+  }
+
+  return status
+}
+
 function handleKey(input: {
   event: KeyEvent
   menu: MenuState
@@ -590,7 +599,7 @@ export function RunSubagentSelectBody(props: {
         category: "",
         display: title,
         description: title === item.label ? undefined : item.label,
-        footer: subagentStatusLabel(item.status),
+        footer: subagentFooter(item),
         keywords: `${item.label} ${item.description} ${item.title ?? ""} ${item.status}`,
         sessionID: item.sessionID,
         current: props.current() === item.sessionID,

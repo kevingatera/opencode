@@ -168,6 +168,7 @@ export class RunFooter implements FooterApi {
   private closed = false
   private destroyed = false
   private prompts = new Set<(input: RunPrompt) => void>()
+  private subagentPrompts = new Set<(input: { sessionID: string; prompt: RunPrompt }) => void>()
   private queuedRemoves = new Set<(messageID: string) => boolean | Promise<boolean>>()
   private closes = new Set<() => void>()
   // Microtask-coalesced commit queue. Flushed on next microtask or on close/destroy.
@@ -341,6 +342,7 @@ export class RunFooter implements FooterApi {
               onLayout: footer.syncLayout,
               onStatus: footer.setStatus,
               onSubagentSelect: options.onSubagentSelect,
+              onSubagentSubmit: footer.handleSubagentPrompt,
               onQueuedRemove: footer.handleQueuedRemove,
             })
           },
@@ -365,6 +367,13 @@ export class RunFooter implements FooterApi {
     this.prompts.add(fn)
     return () => {
       this.prompts.delete(fn)
+    }
+  }
+
+  public onSubagentPrompt(fn: (input: { sessionID: string; prompt: RunPrompt }) => void): () => void {
+    this.subagentPrompts.add(fn)
+    return () => {
+      this.subagentPrompts.delete(fn)
     }
   }
 
@@ -714,7 +723,12 @@ export class RunFooter implements FooterApi {
                       ? 1 + this.subagentMenuRows
                       : this.promptRoute.type === "subagent"
                         ? this.base + SUBAGENT_INSPECTOR_ROWS
-                        : this.base + Math.max(TEXTAREA_MIN_ROWS, Math.min(PROMPT_MAX_ROWS, this.rows))
+                        : this.promptRoute.type === "subagent-compose"
+                          ? this.base +
+                            SUBAGENT_INSPECTOR_ROWS +
+                            2 +
+                            Math.max(TEXTAREA_MIN_ROWS, Math.min(PROMPT_MAX_ROWS, this.rows))
+                          : this.base + Math.max(TEXTAREA_MIN_ROWS, Math.min(PROMPT_MAX_ROWS, this.rows))
 
     if (height !== this.renderer.footerHeight) {
       this.renderer.footerHeight = height
@@ -764,6 +778,24 @@ export class RunFooter implements FooterApi {
       fn(input)
     }
 
+    return true
+  }
+
+  private handleSubagentPrompt = (sessionID: string, prompt: RunPrompt): boolean => {
+    if (this.isClosed) {
+      return false
+    }
+
+    if (this.subagentPrompts.size === 0) {
+      this.setNotice("subagent input unavailable")
+      return false
+    }
+
+    for (const fn of [...this.subagentPrompts]) {
+      fn({ sessionID, prompt })
+    }
+
+    this.setNotice("sent to subagent")
     return true
   }
 

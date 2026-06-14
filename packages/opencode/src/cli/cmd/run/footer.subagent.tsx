@@ -54,6 +54,7 @@ export function RunFooterSubagentBody(props: {
   width: () => number
   diffStyle?: RunDiffStyle
   onCycle: (dir: -1 | 1) => void
+  onCompose: () => void
   onClose: () => void
 }) {
   const theme = createMemo(() => props.theme())
@@ -81,7 +82,7 @@ export function RunFooterSubagentBody(props: {
       return ""
     }
 
-    return current.label
+    return [current.label, current.resumed ? "resumed" : undefined].filter(Boolean).join(" · ")
   })
   const rows = indexArray(commits, (commit, index) => (
     <box flexDirection="column" gap={0} flexShrink={0}>
@@ -105,6 +106,12 @@ export function RunFooterSubagentBody(props: {
     if (event.name === "tab" && !event.shift) {
       event.preventDefault()
       props.onCycle(1)
+      return
+    }
+
+    if (event.name === "return" || event.name === "i") {
+      event.preventDefault()
+      props.onCompose()
       return
     }
 
@@ -146,6 +153,9 @@ export function RunFooterSubagentBody(props: {
                   {props.index()} of {props.total()}
                 </text>
               </Show>
+              <text fg={footer().muted} wrapMode="none" truncate flexShrink={0}>
+                enter/i instruct
+              </text>
             </box>
           )}
         </Show>
