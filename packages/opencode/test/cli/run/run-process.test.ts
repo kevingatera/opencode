@@ -335,4 +335,23 @@ describe("opencode run (non-interactive subprocess)", () => {
       }),
     30_000,
   )
-})
+
+  cliIt.concurrent(
+    "--format json waits for final text after tool calls",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        yield* llm.tool("bash", { command: "printf fixture", description: "Print fixture" })
+        yield* llm.text('```json\n{"ok":true}\n```')
+        const result = yield* opencode.run("run a command, then answer", {
+          format: "json",
+          extraArgs: ["--dangerously-skip-permissions"],
+        })
+        opencode.expectExit(result, 0)
+
+        const events = opencode.parseJsonEvents(result.stdout)
+        const text = events.find((e) => e.type === "text")
+        expect(text).toBeDefined()
+        expect((text?.part as { text?: string } | undefined)?.text).toContain('"ok":true')
+      }),
+    60_000,
+  )})

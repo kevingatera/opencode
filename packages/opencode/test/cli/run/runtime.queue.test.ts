@@ -20,6 +20,7 @@ function footer() {
         prompts.delete(fn)
       }
     },
+    onSubagentPrompt: () => () => {},
     onQueuedRemove(fn) {
       queuedRemoves.add(fn)
       return () => {

@@ -124,6 +124,7 @@ function subagent(input: {
   label: string
   description: string
   status?: FooterSubagentTab["status"]
+  resumed?: boolean
 }) {
   return {
     sessionID: input.sessionID,
@@ -132,6 +133,7 @@ function subagent(input: {
     label: input.label,
     description: input.description,
     status: input.status ?? "running",
+    resumed: input.resumed,
     lastUpdatedAt: 1,
   } satisfies FooterSubagentTab
 }
@@ -166,6 +168,7 @@ async function renderFooter(
     state?: Partial<FooterState>
     onCycle?: () => void
     onSubmit?: (prompt: RunPrompt) => boolean
+    onSubagentSubmit?: (sessionID: string, prompt: RunPrompt) => boolean
   } = {},
 ) {
   const [view] = createSignal<FooterView>({ type: "prompt" })
@@ -214,6 +217,7 @@ async function renderFooter(
           onRows={() => {}}
           onLayout={() => {}}
           onStatus={() => {}}
+          onSubagentSubmit={input.onSubagentSubmit ?? (() => true)}
           onQueuedRemove={async () => true}
         />
       </OpencodeKeymapProvider>
@@ -598,7 +602,13 @@ test("direct command panel keeps completed subagents available", async () => {
 test("direct subagent panel renders active subagents", async () => {
   const [tabs] = createSignal([
     subagent({ sessionID: "s-1", label: "Explore", description: "Inspect auth flow" }),
-    subagent({ sessionID: "s-2", label: "General", description: "Write migration plan", status: "completed" }),
+    subagent({
+      sessionID: "s-2",
+      label: "General",
+      description: "Write migration plan",
+      status: "completed",
+      resumed: true,
+    }),
   ])
   const [current] = createSignal<string | undefined>("s-1")
   let rows = 0
@@ -632,6 +642,7 @@ test("direct subagent panel renders active subagents", async () => {
     expect(frame).toContain("Select subagent")
     expect(frame).toContain("Inspect auth flow")
     expect(frame).toContain("Write migration plan")
+    expect(frame).toContain("resumed")
     expect(frame).toContain("done")
     expect(frame).not.toContain("┌")
     expect(frame).not.toContain("┃")
@@ -711,6 +722,60 @@ test("direct queued prompt panel renders pending prompt actions", async () => {
     expectPaletteList(list, 0)
   } finally {
     app.renderer.destroy()
+  }
+})
+
+test("direct footer sends subagent instructions without parent prompt submission", async () => {
+  const parentSubmits: RunPrompt[] = []
+  const subagentSubmits: Array<{ sessionID: string; prompt: RunPrompt }> = []
+  const app = await renderFooter({
+    height: 20,
+    subagents: {
+      tabs: [subagent({ sessionID: "s-1", label: "General", description: "Compaction cleanup" })],
+      details: {
+        "s-1": {
+          sessionID: "s-1",
+          commits: [],
+        },
+      },
+      permissions: [],
+      questions: [],
+    },
+    onSubmit(prompt) {
+      parentSubmits.push(prompt)
+      return true
+    },
+    onSubagentSubmit(sessionID, prompt) {
+      subagentSubmits.push({ sessionID, prompt })
+      return true
+    },
+  })
+
+  try {
+    await app.renderOnce()
+    app.mockInput.pressKey("x", { ctrl: true })
+    app.mockInput.pressKey("ARROW_DOWN")
+    await app.renderOnce()
+    app.mockInput.pressEnter()
+    await app.renderOnce()
+    app.mockInput.pressKey("i")
+    await app.renderOnce()
+    "continue now".split("").forEach((key) => app.mockInput.pressKey(key))
+    app.mockInput.pressEnter()
+    await app.renderOnce()
+
+    expect(parentSubmits).toEqual([])
+    expect(subagentSubmits).toEqual([
+      {
+        sessionID: "s-1",
+        prompt: {
+          text: "continue now",
+          parts: [],
+        },
+      },
+    ])
+  } finally {
+    app.cleanup()
   }
 })
 
@@ -1003,6 +1068,7 @@ test("direct footer shows editable prompts and additional queued work while runn
           onRows={() => {}}
           onLayout={() => {}}
           onStatus={() => {}}
+          onSubagentSubmit={() => true}
           onQueuedRemove={async () => true}
         />
       </OpencodeKeymapProvider>

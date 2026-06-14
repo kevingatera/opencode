@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { ToolPart } from "@opencode-ai/sdk/v2"
 import { entryBody, entryCanStream, entryDone } from "@/cli/cmd/run/entry.body"
+import { toolInlineInfo } from "@/cli/cmd/run/tool"
 import type { StreamCommit, ToolSnapshot } from "@/cli/cmd/run/types"
 
 function commit(input: Partial<StreamCommit> & Pick<StreamCommit, "kind" | "text" | "phase" | "source">): StreamCommit {
@@ -129,6 +130,35 @@ describe("run entry body", () => {
         title: "# Wrote src/a.ts",
         content: "const x = 1\n",
         file: "src/a.ts",
+      },
+    },
+    {
+      name: "prefers completed write diffs when available",
+      commit: toolCommit({
+        tool: "write",
+        state: {
+          status: "completed",
+          input: {
+            filePath: "src/a.ts",
+            content: "new\n",
+          },
+          output: "",
+          title: "",
+          metadata: {
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+          },
+          time: { start: 1, end: 2 },
+        },
+      }),
+      snapshot: {
+        kind: "diff",
+        items: [
+          {
+            title: "# Wrote src/a.ts",
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+            file: "src/a.ts",
+          },
+        ],
       },
     },
     {
@@ -279,6 +309,60 @@ describe("run entry body", () => {
       title: "# Explore Task",
       rows: ["Inspect reducer"],
       tail: "",
+    })
+
+    expect(
+      structured(
+        toolCommit({
+          tool: "task",
+          state: {
+            status: "completed",
+            input: {
+              description: "Inspect reducer",
+              subagent_type: "explore",
+            },
+            title: "",
+            output: ['<task id="child-1" state="completed">', "<task_result>", "", "</task_result>", "</task>"].join(
+              "\n",
+            ),
+            metadata: {
+              sessionId: "child-1",
+              resumed: true,
+            },
+            time: { start: 1, end: 2 },
+          },
+        }),
+      ),
+    ).toEqual({
+      kind: "task",
+      title: "# Explore Task · resumed",
+      rows: ["Inspect reducer"],
+      tail: "",
+    })
+  })
+
+  test("shows resumed task state in inline task rows", () => {
+    expect(
+      toolInlineInfo(
+        toolPart("task", {
+          status: "completed",
+          input: {
+            description: "Inspect reducer",
+            subagent_type: "explore",
+          },
+          title: "",
+          output: "",
+          metadata: {
+            sessionId: "child-1",
+            resumed: true,
+          },
+          time: { start: 1, end: 2 },
+        }),
+      ),
+    ).toEqual({
+      icon: "✓",
+      title: "Inspect reducer · resumed",
+      description: "Explore Agent · resumed",
     })
   })
 

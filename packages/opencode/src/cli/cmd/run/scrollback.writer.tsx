@@ -212,6 +212,8 @@ export function RunEntryContent(props: {
                     lineNumberBg={diffBg(theme().block.diffContextBg)}
                     addedLineNumberBg={diffBg(theme().block.diffAddedLineNumberBg)}
                     removedLineNumberBg={diffBg(theme().block.diffRemovedLineNumberBg)}
+                    highlightAddedBg={diffBg(theme().block.diffHighlightAddedBg)}
+                    highlightRemovedBg={diffBg(theme().block.diffHighlightRemovedBg)}
                   />
                 </box>
               ) : (

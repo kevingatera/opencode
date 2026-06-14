@@ -534,6 +534,37 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
     }, RESIZE_DELAY)
   })
 
+  const offSubagentPrompt = footer.onSubagentPrompt(({ sessionID, prompt }) => {
+    void (async () => {
+      try {
+        await ensureStream()
+        state.selectSubagent?.(sessionID)
+        log?.write("subagent.prompt", {
+          sessionID,
+        })
+        await ctx.sdk.session.promptAsync({
+          sessionID,
+          messageID: prompt.messageID,
+          parts: [{ type: "text", text: prompt.text }, ...prompt.parts],
+        })
+        log?.write("subagent.prompt.ok", {
+          sessionID,
+        })
+      } catch (error) {
+        if (footer.isClosed) {
+          return
+        }
+
+        footer.event({
+          type: "stream.patch",
+          patch: {
+            status: error instanceof Error ? error.message : "failed to send subagent instruction",
+          },
+        })
+      }
+    })()
+  })
+
   const runQueue = async () => {
     let includeFiles = true
     if (state.demo) {
@@ -719,6 +750,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
       await state.stream?.then((item) => item.handle.close()).catch(() => {})
     }
   } finally {
+    offSubagentPrompt()
     const title = await resolveExitTitle(ctx, input, state)
 
     await shell.close({

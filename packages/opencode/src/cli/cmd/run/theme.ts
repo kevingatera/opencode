@@ -55,6 +55,8 @@ export type RunBlockTheme = {
   diffContextBg: ColorInput
   diffHighlightAdded: ColorInput
   diffHighlightRemoved: ColorInput
+  diffHighlightAddedBg: ColorInput
+  diffHighlightRemovedBg: ColorInput
   diffLineNumber: ColorInput
   diffAddedLineNumberBg: ColorInput
   diffRemovedLineNumberBg: ColorInput
@@ -78,9 +80,14 @@ type Variant = {
 type ColorValue = HexColor | RefName | Variant | RGBA | number
 type ThemeJson = {
   defs?: Record<string, HexColor | RefName>
-  theme: Omit<Record<ThemeColor, ColorValue>, "selectedListItemText" | "backgroundMenu"> & {
+  theme: Omit<
+    Record<ThemeColor, ColorValue>,
+    "selectedListItemText" | "backgroundMenu" | "diffHighlightAddedBg" | "diffHighlightRemovedBg"
+  > & {
     selectedListItemText?: ColorValue
     backgroundMenu?: ColorValue
+    diffHighlightAddedBg?: ColorValue
+    diffHighlightRemovedBg?: ColorValue
     thinkingOpacity?: number
   }
 }
@@ -432,6 +439,8 @@ export function generateSystem(colors: TerminalColors, pick: "dark" | "light"): 
       diffHunkHeader: grays[7],
       diffHighlightAdded: ansi.green_bright,
       diffHighlightRemoved: ansi.red_bright,
+      diffHighlightAddedBg: tint(bg_snapshot, ansi.green, isDark ? 0.32 : 0.2),
+      diffHighlightRemovedBg: tint(bg_snapshot, ansi.red, isDark ? 0.32 : 0.2),
       diffAddedBg: tint(bg_snapshot, ansi.green, diff_alpha),
       diffRemovedBg: tint(bg_snapshot, ansi.red, diff_alpha),
       diffContextBg: diff_context_bg,
@@ -574,6 +583,8 @@ function map(
       diffContextBg: transparent,
       diffHighlightAdded: scrollbackTheme.diffHighlightAdded,
       diffHighlightRemoved: scrollbackTheme.diffHighlightRemoved,
+      diffHighlightAddedBg: scrollbackTheme.diffHighlightAddedBg,
+      diffHighlightRemovedBg: scrollbackTheme.diffHighlightRemovedBg,
       diffLineNumber: scrollbackTheme.diffLineNumber,
       diffAddedLineNumberBg: scrollbackTheme.diffAddedLineNumberBg,
       diffRemovedLineNumberBg: scrollbackTheme.diffRemovedLineNumberBg,
@@ -647,6 +658,8 @@ export const RUN_THEME_FALLBACK: RunTheme = {
     diffContextBg: alpha(seed.panel, 0.72),
     diffHighlightAdded: seed.success,
     diffHighlightRemoved: seed.error,
+    diffHighlightAddedBg: alpha(seed.success, 0.28),
+    diffHighlightRemovedBg: alpha(seed.error, 0.28),
     diffLineNumber: seed.muted,
     diffAddedLineNumberBg: alpha(seed.success, 0.12),
     diffRemovedLineNumberBg: alpha(seed.error, 0.12),

@@ -590,4 +590,113 @@ describe("run session data", () => {
       }),
     ])
   })
+
+
+  test("session data omits persisted textual tool-call markup from assistant replay", () => {
+    const data = createSessionData()
+    const sessionID = "ses_test"
+  
+    reduceSessionData({
+      data,
+      sessionID,
+      thinking: true,
+      limits: {},
+      event: {
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: {
+            id: "msg_assistant",
+            role: "assistant",
+            providerID: "opencode-go",
+            modelID: "minimax-m3",
+          },
+        },
+      } as any,
+    })
+  
+    const output = reduceSessionData({
+      data,
+      sessionID,
+      thinking: true,
+      limits: {},
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "prt_text",
+            messageID: "msg_assistant",
+            sessionID,
+            type: "text",
+            text: [
+              "Tool result 2 todos:",
+              "[]",
+              "<function_calls>",
+              '<invoke name="bash">',
+              '<parameter name="command">pytest</parameter>',
+              "</invoke>",
+              "</function_calls>",
+            ].join("\n"),
+            time: { start: 1, end: 2 },
+          },
+        },
+      } as any,
+    })
+  
+    expect(output.commits).toEqual([])
+  })
+  
+  test("session data omits embedded textual tool result markup from assistant replay", () => {
+    const data = createSessionData()
+    const sessionID = "ses_test"
+  
+    reduceSessionData({
+      data,
+      sessionID,
+      thinking: true,
+      limits: {},
+      event: {
+        type: "message.updated",
+        properties: {
+          sessionID,
+          info: {
+            id: "msg_assistant",
+            role: "assistant",
+            providerID: "opencode-go",
+            modelID: "minimax-m3",
+          },
+        },
+      } as any,
+    })
+  
+    const output = reduceSessionData({
+      data,
+      sessionID,
+      thinking: true,
+      limits: {},
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            id: "prt_text",
+            messageID: "msg_assistant",
+            sessionID,
+            type: "text",
+            text: [
+              "Let me check the current state and fix the issue.Tool result 3 todos:",
+              "[]",
+            ].join("\n"),
+            time: { start: 1, end: 2 },
+          },
+        },
+      } as any,
+    })
+  
+    expect(output.commits).toEqual([
+      expect.objectContaining({
+        kind: "assistant",
+        text: "Let me check the current state and fix the issue.",
+      }),
+    ])
+  })
 })

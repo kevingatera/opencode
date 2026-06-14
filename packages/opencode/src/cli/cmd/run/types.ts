@@ -180,6 +180,7 @@ export type FooterPromptRoute =
   | { type: "queued-menu" }
   | { type: "subagent-menu" }
   | { type: "subagent"; sessionID: string }
+  | { type: "subagent-compose"; sessionID: string }
   | { type: "command" }
   | { type: "skill" }
   | { type: "model" }
@@ -193,6 +194,7 @@ export type FooterSubagentTab = {
   description: string
   status: "running" | "completed" | "cancelled" | "error"
   background?: boolean
+  resumed?: boolean
   title?: string
   toolCalls?: number
   lastUpdatedAt: number
@@ -340,6 +342,7 @@ export type LocalReplayRow = {
 export type FooterApi = {
   readonly isClosed: boolean
   onPrompt(fn: (input: RunPrompt) => void): () => void
+  onSubagentPrompt(fn: (input: { sessionID: string; prompt: RunPrompt }) => void): () => void
   onQueuedRemove(fn: (messageID: string) => boolean | Promise<boolean>): () => void
   onClose(fn: () => void): () => void
   event(next: FooterEvent): void

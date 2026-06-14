@@ -388,6 +388,8 @@ export function RunPermissionBody(props: {
                       lineNumberBg={props.block.diffContextBg}
                       addedLineNumberBg={props.block.diffAddedLineNumberBg}
                       removedLineNumberBg={props.block.diffRemovedLineNumberBg}
+                      highlightAddedBg={props.block.diffHighlightAddedBg}
+                      highlightRemovedBg={props.block.diffHighlightRemovedBg}
                     />
                   </Show>
                   <Show when={!info().diff && info().lines.length === 0}>

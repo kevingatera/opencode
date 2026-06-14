@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test"
 import { OpencodeClient } from "@opencode-ai/sdk/v2"
 import { runInteractiveMode } from "@/cli/cmd/run/runtime"
-import type { FooterApi, RunProvider } from "@/cli/cmd/run/types"
+import type { FooterApi, RunPrompt, RunProvider } from "@/cli/cmd/run/types"
 
 type SessionMessage = NonNullable<Awaited<ReturnType<OpencodeClient["session"]["messages"]>>["data"]>[number]
 
@@ -81,9 +81,11 @@ function ok<T>(data: T) {
   })
 }
 
-function footer(): FooterApi {
+function footer() {
   let closed = false
   const closes = new Set<() => void>()
+  const subagentPrompts = new Set<(input: { sessionID: string; prompt: RunPrompt }) => void>()
+  const subagentRegistered = defer<void>()
 
   const notify = () => {
     for (const fn of closes) fn()
@@ -94,6 +96,13 @@ function footer(): FooterApi {
       return closed
     },
     onPrompt: () => () => {},
+    onSubagentPrompt(fn) {
+      subagentPrompts.add(fn)
+      subagentRegistered.resolve()
+      return () => {
+        subagentPrompts.delete(fn)
+      }
+    },
     onQueuedRemove: () => () => {},
     onClose(fn) {
       if (closed) {
@@ -127,6 +136,13 @@ function footer(): FooterApi {
       closed = true
       notify()
     },
+    emitSubagentPrompt(input: { sessionID: string; prompt: RunPrompt }) {
+      for (const fn of [...subagentPrompts]) fn(input)
+    },
+    subagentRegistered: subagentRegistered.promise,
+  } satisfies FooterApi & {
+    emitSubagentPrompt(input: { sessionID: string; prompt: RunPrompt }): void
+    subagentRegistered: Promise<void>
   }
 }
 
@@ -234,5 +250,98 @@ describe("run interactive runtime", () => {
     await task
 
     expect(transportProviders).toEqual([[provider]])
+  })
+
+  test("sends footer subagent prompts to the child session", async () => {
+    const ui = footer()
+    const selected: Array<string | undefined> = []
+    const prompted = defer<void>()
+    const sdk = new OpencodeClient()
+    spyOn(sdk.config, "providers").mockImplementation(() => ok({ providers: [provider], default: {} }))
+    spyOn(sdk.session, "messages").mockImplementation(() => ok([]))
+    spyOn(sdk.session, "get").mockImplementation(() =>
+      ok({
+        id: "ses-1",
+        slug: "ses-1",
+        projectID: "proj-1",
+        directory: "/tmp",
+        title: "Session",
+        version: "1.0.0",
+        time: { created: 1, updated: 1 },
+      }),
+    )
+    spyOn(sdk.session, "promptAsync").mockImplementation(async (input) => {
+      expect(input).toEqual({
+        sessionID: "ses-child",
+        messageID: "msg-child-prompt",
+        parts: [
+          { type: "text", text: "continue child" },
+          { type: "file", url: "file:///tmp/a.ts", filename: "a.ts", mime: "text/typescript" },
+        ],
+      })
+      prompted.resolve()
+      return ok(undefined)
+    })
+    spyOn(sdk.app, "agents").mockImplementation(() => ok([]))
+    spyOn(sdk.experimental.resource, "list").mockImplementation(() => ok({}))
+    spyOn(sdk.command, "list").mockImplementation(() => ok([]))
+
+    const task = runInteractiveMode(
+      {
+        sdk,
+        directory: "/tmp",
+        sessionID: "ses-1",
+        sessionTitle: "Session",
+        resume: true,
+        replay: true,
+        replayLimit: 100,
+        agent: "build",
+        model: {
+          providerID: "openai",
+          modelID: "gpt-5",
+        },
+        variant: undefined,
+        files: [],
+        thinking: true,
+        backgroundSubagents: false,
+      },
+      {
+        createRuntimeLifecycle: async () => ({
+          footer: ui,
+          onResize: () => () => {},
+          refreshTheme: () => {},
+          resetForReplay: () => Promise.resolve(),
+          close: () => Promise.resolve(),
+        }),
+        streamTransport: Promise.resolve({
+          createSessionTransport: async () => ({
+            runPromptTurn: async () => {},
+            selectSubagent: (sessionID) => {
+              selected.push(sessionID)
+            },
+            replayOnResize: async () => false,
+            close: async () => {},
+          }),
+          formatUnknownError: (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        }),
+      },
+    )
+
+    await ui.subagentRegistered
+    ui.emitSubagentPrompt({
+      sessionID: "ses-child",
+      prompt: {
+        messageID: "msg-child-prompt",
+        text: "continue child",
+        parts: [{ type: "file", url: "file:///tmp/a.ts", filename: "a.ts", mime: "text/typescript" }],
+      },
+    })
+
+    await prompted.promise
+    ui.close()
+    await task
+
+    expect(selected).toEqual(["ses-child"])
+    expect(sdk.session.promptAsync).toHaveBeenCalledTimes(1)
   })
 })
