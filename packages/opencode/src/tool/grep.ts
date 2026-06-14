@@ -1,11 +1,13 @@
 import path from "path"
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { FSUtil } from "@opencode-ai/core/fs-util"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import DESCRIPTION from "./grep.txt"
 import * as Tool from "./tool"
+
+const MAX_DISPLAY_MATCHES = 100
 
 export const Parameters = Schema.Struct({
   pattern: Schema.String.annotate({ description: "The regex pattern to search for in file contents" }),
@@ -64,7 +66,9 @@ export const GrepTool = Tool.define(
             cwd,
             pattern: params.pattern,
             include: params.include,
-            limit: 100,
+            file: info?.type === "Directory" ? undefined : path.relative(cwd, search),
+            limit: MAX_DISPLAY_MATCHES + 1,
+            signal: ctx.abort,
           })
           if (result.length === 0) return empty
 
@@ -76,15 +80,37 @@ export const GrepTool = Tool.define(
             line: item.line,
             text: item.text,
           }))
+          const times = new Map(
+            (yield* Effect.forEach(
+              [...new Set(rows.map((row) => row.path))],
+              Effect.fnUntraced(function* (file) {
+                const info = yield* fs.stat(file).pipe(Effect.catch(() => Effect.succeed(undefined)))
+                if (!info || info.type === "Directory") return undefined
+                return [
+                  file,
+                  info.mtime.pipe(
+                    Option.map((time) => time.getTime()),
+                    Option.getOrElse(() => 0),
+                  ),
+                ] as const
+              }),
+              { concurrency: 16 },
+            )).filter((entry): entry is readonly [string, number] => Boolean(entry)),
+          )
+          const matches = rows
+            .flatMap((row) => {
+              const mtime = times.get(row.path)
+              if (mtime === undefined) return []
+              return [{ ...row, mtime }]
+            })
+            .toSorted((a, b) => b.mtime - a.mtime)
 
-          const limit = 100
-          const truncated = rows.length === limit
-          const final = rows
+          const truncated = matches.length > MAX_DISPLAY_MATCHES
+          const final = truncated ? matches.slice(0, MAX_DISPLAY_MATCHES) : matches
           if (final.length === 0) return empty
 
-          const total = rows.length
-          const hasMore = truncated || result.length === limit
-          const output = [`Found ${total} matches${hasMore ? " (more matches available)" : ""}`]
+          const total = truncated ? `${MAX_DISPLAY_MATCHES}+` : String(final.length)
+          const output = [`Found ${total} matches${truncated ? ` (showing first ${MAX_DISPLAY_MATCHES})` : ""}`]
 
           let current = ""
           for (const match of final) {
@@ -98,13 +124,15 @@ export const GrepTool = Tool.define(
 
           if (truncated) {
             output.push("")
-            output.push("(Results truncated. Consider using a more specific path or pattern.)")
+            output.push(
+              `(Results truncated: showing ${MAX_DISPLAY_MATCHES} matches. Consider using a more specific path or pattern.)`,
+            )
           }
 
           return {
             title: params.pattern,
             metadata: {
-              matches: total,
+              matches: final.length,
               truncated,
             },
             output: output.join("\n"),

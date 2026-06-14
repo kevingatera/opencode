@@ -131,22 +131,28 @@ describe("tool.grep", () => {
     }),
   )
 
-  it.instance("does not report an unknown total when results are truncated", () =>
+  it.instance("truncates large match sets without claiming an exact total", () =>
     Effect.gen(function* () {
       const test = yield* TestInstance
-      yield* Effect.promise(() =>
-        Promise.all(
-          Array.from({ length: 101 }, (_, index) =>
-            Bun.write(path.join(test.directory, `match-${index}.txt`), "needle"),
-          ),
-        ),
+      yield* Effect.forEach(
+        Array.from({ length: 120 }, (_, index) => index),
+        (index) => Effect.promise(() => Bun.write(path.join(test.directory, `match-${index}.txt`), "needle\n")),
       )
+
       const info = yield* GrepTool
       const grep = yield* info.init()
-      const result = yield* grep.execute({ pattern: "needle", path: test.directory, include: "*.txt" }, ctx)
+      const result = yield* grep.execute(
+        {
+          pattern: "needle",
+          path: test.directory,
+        },
+        ctx,
+      )
 
-      expect(result.output).toContain("(Results truncated. Consider using a more specific path or pattern.)")
-      expect(result.output).not.toMatch(/showing \d+ of \d+ matches/)
+      expect(result.metadata.matches).toBe(100)
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain("Found 100+ matches")
+      expect(result.output).toContain("Results truncated: showing 100 matches")
     }),
   )
 

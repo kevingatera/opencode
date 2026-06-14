@@ -1,4 +1,4 @@
-import { Effect, Stream } from "effect"
+import { Deferred, Effect, Fiber, Stream } from "effect"
 import os from "os"
 import { createWriteStream } from "node:fs"
 import * as Tool from "./tool"
@@ -21,10 +21,12 @@ import { ChildProcess } from "effect/unstable/process"
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner"
 import { ShellPrompt, type Parameters } from "./shell/prompt"
 import { BashArity } from "@/permission/arity"
+import { BashSearch } from "@opencode-ai/core/tool/bash-search"
 
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
+const INTERACTIVE_PROMPT_IDLE_MS = 2_000
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
   ...CWD,
@@ -79,6 +81,10 @@ type Scan = {
 type Chunk = {
   text: string
   size: number
+}
+
+type Pending = {
+  text: string
 }
 
 const resolveWasm = (asset: string) => {
@@ -432,6 +438,7 @@ export const ShellTool = Tool.define(
         cwd: string
         env: NodeJS.ProcessEnv
         timeout: number
+        description?: string
       },
       ctx: Tool.Context,
     ) {
@@ -446,6 +453,10 @@ export const ShellTool = Tool.define(
       let cut = false
       let expired = false
       let aborted = false
+      let idlePrompt = false
+      const stdoutPending: Pending = { text: "" }
+      const stderrPending: Pending = { text: "" }
+      let pendingIdle: ReturnType<typeof setTimeout> | undefined
 
       const closeSink = Effect.fnUntraced(function* () {
         const stream = sink
@@ -472,6 +483,83 @@ export const ShellTool = Tool.define(
         ).pipe(Effect.catch(() => Effect.void))
       })
 
+      const clearPendingIdle = () => {
+        if (!pendingIdle) return
+        clearTimeout(pendingIdle)
+        pendingIdle = undefined
+      }
+
+      const updatePendingIdle = (detected: Deferred.Deferred<void>) =>
+        Effect.sync(() => {
+          clearPendingIdle()
+          if (!stdoutPending.text && !stderrPending.text) return
+          pendingIdle = setTimeout(() => {
+            Effect.runFork(Deferred.succeed(detected, undefined).pipe(Effect.ignore))
+          }, INTERACTIVE_PROMPT_IDLE_MS)
+        })
+
+      const publish = () =>
+        ctx.metadata({
+          metadata: {
+            output: last,
+            description: input.description,
+          },
+        })
+
+      const publishPending = () =>
+        ctx.metadata({
+          metadata: {
+            output: preview(last + stdoutPending.text),
+            description: input.description,
+          },
+        })
+
+      const append = (chunk: string) => {
+        if (!chunk) return Effect.void
+
+        const size = Buffer.byteLength(chunk, "utf-8")
+        list.push({ text: chunk, size })
+        used += size
+        while (used > keep && list.length > 1) {
+          const item = list.shift()
+          if (!item) break
+          used -= item.size
+          cut = true
+        }
+
+        last = preview(last + chunk)
+
+        if (file) {
+          sink?.write(chunk)
+          return publish()
+        }
+
+        full += chunk
+        if (Buffer.byteLength(full, "utf-8") <= limits.maxBytes) return publish()
+
+        return trunc.write(full).pipe(
+          Effect.andThen((next) =>
+            Effect.sync(() => {
+              file = next
+              cut = true
+              sink = createWriteStream(next, { flags: "a" })
+              full = ""
+            }),
+          ),
+          Effect.andThen(publish()),
+        )
+      }
+
+      const appendSafe = (state: Pending, chunk: string, detected: Deferred.Deferred<void>) => {
+        state.text += chunk
+        const parts = state.text.split(/(\r?\n)/)
+        const complete = parts.length % 2 === 1 ? parts.slice(0, -1) : parts
+        state.text = parts.length % 2 === 1 ? (parts[parts.length - 1] ?? "") : ""
+        return append(complete.join(""))
+          .pipe(Effect.andThen(updatePendingIdle(detected)))
+          .pipe(Effect.andThen(publishPending()))
+      }
+
       yield* ctx.metadata({
         metadata: {
           output: "",
@@ -481,54 +569,14 @@ export const ShellTool = Tool.define(
       const code: number | null = yield* Effect.scoped(
         Effect.gen(function* () {
           yield* Effect.addFinalizer(closeSink)
+          yield* Effect.addFinalizer(() => Effect.sync(clearPendingIdle))
           const handle = yield* spawner.spawn(cmd(input.shell, input.command, input.cwd, input.env))
+          const promptIdle = yield* Deferred.make<void>()
 
-          yield* Effect.forkScoped(
-            Stream.runForEach(Stream.decodeText(handle.all), (chunk) => {
-              const size = Buffer.byteLength(chunk, "utf-8")
-              list.push({ text: chunk, size })
-              used += size
-              while (used > keep && list.length > 1) {
-                const item = list.shift()
-                if (!item) break
-                used -= item.size
-                cut = true
-              }
-
-              last = preview(last + chunk)
-
-              if (file) {
-                sink?.write(chunk)
-              } else {
-                full += chunk
-                if (Buffer.byteLength(full, "utf-8") > limits.maxBytes) {
-                  return trunc.write(full).pipe(
-                    Effect.andThen((next) =>
-                      Effect.sync(() => {
-                        file = next
-                        cut = true
-                        sink = createWriteStream(next, { flags: "a" })
-                        full = ""
-                      }),
-                    ),
-                    Effect.andThen(
-                      ctx.metadata({
-                        metadata: {
-                          output: last,
-                        },
-                      }),
-                    ),
-                  )
-                }
-              }
-
-              return ctx.metadata({
-                metadata: {
-                  output: last,
-                },
-              })
-            }),
-          )
+          const drain = (stream: typeof handle.stdout, state: Pending) =>
+            Stream.runForEach(Stream.decodeText(stream), (chunk) => appendSafe(state, chunk, promptIdle))
+          const stdoutFiber = yield* Effect.forkScoped(drain(handle.stdout, stdoutPending))
+          const stderrFiber = yield* Effect.forkScoped(drain(handle.stderr, stderrPending))
 
           const abort = Effect.callback<void>((resume) => {
             if (ctx.abort.aborted) return resume(Effect.void)
@@ -543,8 +591,10 @@ export const ShellTool = Tool.define(
             handle.exitCode.pipe(Effect.map((code) => ({ kind: "exit" as const, code }))),
             abort.pipe(Effect.map(() => ({ kind: "abort" as const, code: null }))),
             timeout.pipe(Effect.map(() => ({ kind: "timeout" as const, code: null }))),
+            Deferred.await(promptIdle).pipe(Effect.map(() => ({ kind: "prompt-idle" as const, code: null }))),
           ])
 
+          clearPendingIdle()
           if (exit.kind === "abort") {
             aborted = true
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
@@ -553,7 +603,19 @@ export const ShellTool = Tool.define(
             expired = true
             yield* handle.kill({ forceKillAfter: "3 seconds" }).pipe(Effect.orDie)
           }
+          if (exit.kind === "prompt-idle") {
+            idlePrompt = true
+            yield* handle.kill({ forceKillAfter: "0 seconds" }).pipe(Effect.orDie)
+          }
 
+          yield* Fiber.join(stdoutFiber)
+          yield* Fiber.join(stderrFiber)
+          if (exit.kind === "exit") {
+            yield* append(stdoutPending.text)
+            yield* append(stderrPending.text)
+          }
+          stdoutPending.text = ""
+          stderrPending.text = ""
           return exit.kind === "exit" ? exit.code : null
         }),
       ).pipe(Effect.orDie)
@@ -565,6 +627,11 @@ export const ShellTool = Tool.define(
         )
       }
       if (aborted) meta.push("User aborted the command")
+      if (idlePrompt) {
+        meta.push(
+          "shell tool terminated command after detecting an unterminated interactive prompt. Retry with non-interactive input or preconfigured authentication.",
+        )
+      }
       const raw = list.map((item) => item.text).join("")
       const end = tail(raw, limits.maxLines, limits.maxBytes)
       if (end.cut) cut = true
@@ -582,12 +649,19 @@ export const ShellTool = Tool.define(
       if (meta.length > 0) {
         output += "\n\n<shell_metadata>\n" + meta.join("\n") + "\n</shell_metadata>"
       }
+      const searchOutput = BashSearch.shapeOutput(input.command, output)
+      output = searchOutput.output
       return {
         title: input.command,
         metadata: {
-          output: last || preview(output),
+          output: searchOutput.warnings.length ? output : last || preview(output),
           exit: code,
-          truncated: cut,
+          description: input.description,
+          truncated: cut || searchOutput.truncated,
+          ...(searchOutput.warnings[0] ? { warning: searchOutput.warnings[0] } : {}),
+          ...(searchOutput.truncated
+            ? { bashSearchOutputTruncated: true, bashSearchOmittedLines: searchOutput.omittedLines }
+            : {}),
           ...(cut && file ? { outputPath: file } : {}),
         },
         output,
@@ -635,6 +709,7 @@ export const ShellTool = Tool.define(
                   cwd,
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
+                  description: params.description,
                 },
                 ctx,
               )

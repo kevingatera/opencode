@@ -14,6 +14,7 @@ import { PositiveInt } from "../schema"
 import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
+import { BashSearch } from "./bash-search"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -184,13 +185,15 @@ const layer = Layer.effectDiscard(
               }
 
               const output = result.output?.toString("utf8") || "(no output)"
+              const searchOutput = BashSearch.shapeOutput(input.command, output)
+              warnings.push(...searchOutput.warnings)
               const notice = result.outputTruncated
                 ? "[output capture truncated at the in-memory safety limit]"
                 : undefined
               return {
                 exit: result.exitCode,
-                output: notice ? `${output}\n\n${notice}` : output,
-                truncated: result.outputTruncated === true,
+                output: notice ? `${searchOutput.output}\n\n${notice}` : searchOutput.output,
+                truncated: searchOutput.truncated || result.outputTruncated === true,
                 ...(warnings.length ? { warnings } : {}),
               }
             }).pipe(Effect.mapError(() => new ToolFailure({ message: `Unable to execute command: ${input.command}` }))),
