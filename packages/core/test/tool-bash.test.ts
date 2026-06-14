@@ -343,6 +343,62 @@ describe("BashTool", () => {
     ),
   )
 
+  it.live("warns when bash is used for unbounded repo search", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        result = {
+          ...result,
+          stdout: Buffer.from(Array.from({ length: 45 }, (_, i) => `needle line ${i + 1}`).join("\n")),
+        }
+        return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "rg needle ." }))).pipe(
+          Effect.andThen((settled) =>
+            Effect.sync(() => {
+              const structured = settled.output?.structured as { warnings?: string[] } | undefined
+              expect(structured?.warnings).toEqual([
+                "This looks like repo content search through Bash. Use the Grep tool next so output is match-bounded, permission-scoped, and respects repo ignore files. If Bash search is necessary, narrow it with an explicit path/glob/count-only option.",
+              ])
+              expect(settled.output?.structured).toMatchObject({ truncated: true })
+              expect(settled.result).toMatchObject({
+                type: "text",
+                value: expect.stringContaining("Bash search warning:"),
+              })
+              const modelText = settled.output?.content.find((item) => item.type === "text")?.text ?? ""
+              expect(modelText).toContain("Use the Grep tool next")
+              expect(modelText).toContain("45 Bash search output lines omitted")
+              expect(modelText).not.toContain("needle line 1")
+              expect(modelText).not.toContain("needle line 45")
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("does not warn when bash search is bounded", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        return withTool(tmp.path, (registry) => settleTool(registry, call({ command: "rg --count needle ." }))).pipe(
+          Effect.andThen((settled) =>
+            Effect.sync(() => {
+              const structured = settled.output?.structured as { warnings?: string[] } | undefined
+              expect(structured?.warnings).toBeUndefined()
+              expect(settled.result).toMatchObject({
+                type: "text",
+                value: expect.not.stringContaining("Prefer the Grep tool"),
+              })
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("keeps non-zero exits useful", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

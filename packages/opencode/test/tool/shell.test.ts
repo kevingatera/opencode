@@ -1093,6 +1093,80 @@ describe("tool.shell abort", () => {
     )
   }
 
+  it.live(
+    "terminates idle unterminated password prompts without leaking them",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const updates: string[] = []
+          const command = `${bin} -e ${evalarg(`process.stdout.write("before\\n"); setTimeout(() => { process.stderr.write("Password for key: ") }, 100); setTimeout(() => {}, 30000)`)}`
+          const started = Date.now()
+          const result = yield* run(
+            {
+              command: PS.has(sh()) ? `& ${command}` : command,
+              description: "Password prompt idle test",
+              timeout: 10_000,
+            },
+            {
+              ...ctx,
+              metadata: (input) =>
+                Effect.sync(() => {
+                  updates.push((input.metadata as { output?: string })?.output ?? "")
+                }),
+            },
+          )
+          expect(Date.now() - started).toBeLessThan(6_000)
+          expect(result.output).toContain("before")
+          expect(result.output).toContain("unterminated interactive prompt")
+          expect(result.output).not.toContain("Password for key")
+          expect(result.metadata.output).not.toContain("Password for key")
+          expect(updates.every((item) => !item.includes("Password for key"))).toBe(true)
+        }),
+      ),
+    15_000,
+  )
+
+  it.live(
+    "terminates idle unterminated prompts split across chunks",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const command = `${bin} -e ${evalarg(`process.stderr.write("Pass"); setTimeout(() => { process.stderr.write("word for repo: ") }, 50); setTimeout(() => {}, 30000)`)}`
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${command}` : command,
+            description: "Split password prompt test",
+            timeout: 10_000,
+          })
+          expect(result.output).toContain("unterminated interactive prompt")
+          expect(result.output).not.toContain("Password for repo")
+          expect(result.metadata.output).not.toContain("Password for repo")
+        }),
+      ),
+    15_000,
+  )
+
+  it.live(
+    "terminates idle generic unterminated prompts without leaking them",
+    () =>
+      runIn(
+        projectRoot,
+        Effect.gen(function* () {
+          const command = `${bin} -e ${evalarg(`process.stderr.write("Username for repo: "); setTimeout(() => {}, 30000)`)}`
+          const result = yield* run({
+            command: PS.has(sh()) ? `& ${command}` : command,
+            description: "Generic prompt idle test",
+            timeout: 10_000,
+          })
+          expect(result.output).toContain("unterminated interactive prompt")
+          expect(result.output).not.toContain("Username for repo")
+          expect(result.metadata.output).not.toContain("Username for repo")
+        }),
+      ),
+    15_000,
+  )
+
   it.live("returns non-zero exit code", () =>
     runIn(
       projectRoot,
@@ -1173,6 +1247,59 @@ describe("tool.shell truncation", () => {
         expect(result.output).toContain("1")
       }),
     ),
+  )
+
+  it.live("warns when bash is used for unbounded repo search", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            Bun.write(
+              path.join(tmp, "file.txt"),
+              Array.from({ length: 45 }, (_, i) => `needle line ${i + 1}`).join("\n"),
+            ),
+          )
+
+          const result = yield* run({
+            command: "rg needle .",
+            description: "Search repo through bash",
+          })
+
+          expect(result.output.startsWith("Bash search warning:")).toBe(true)
+          expect(result.output).toContain("Use the Grep tool next")
+          expect(result.output).toContain("45 Bash search output lines omitted")
+          expect(result.output).not.toContain("needle line 1")
+          expect(result.output).not.toContain("needle line 45")
+          expect(result.metadata.output).toContain("45 Bash search output lines omitted")
+          expect(result.metadata.output).not.toContain("needle line 1")
+          expect(result.metadata.output).not.toContain("needle line 45")
+          expect((result.metadata as { warning?: string }).warning).toContain("repo content search")
+          expect((result.metadata as { bashSearchOutputTruncated?: boolean }).bashSearchOutputTruncated).toBe(true)
+        }),
+      )
+    }),
+  )
+
+  it.live("does not warn for bounded bash search", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          yield* Effect.promise(() => Bun.write(path.join(tmp, "file.txt"), "needle\n"))
+
+          const result = yield* run({
+            command: "rg --count needle .",
+            description: "Count matches through bash",
+          })
+
+          expect(result.output).not.toContain("Bash search warning:")
+          expect((result.metadata as { warning?: string }).warning).toBeUndefined()
+        }),
+      )
+    }),
   )
 
   it.live("full output is saved to file when truncated", () =>
