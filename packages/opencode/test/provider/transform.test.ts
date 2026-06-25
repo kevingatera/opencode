@@ -355,6 +355,162 @@ describe("ProviderTransform.options - zai/zhipuai thinking", () => {
   }
 })
 
+describe("ProviderTransform.message - tool result ordering", () => {
+  const model = {
+    id: "minimax-m3",
+    providerID: "opencode-go",
+    api: {
+      id: "minimax-m3",
+      url: "https://example.com",
+      npm: "@ai-sdk/openai-compatible",
+    },
+    name: "MiniMax M3",
+    capabilities: {
+      temperature: true,
+      reasoning: false,
+      attachment: true,
+      toolcall: true,
+      input: { text: true, audio: false, image: true, video: false, pdf: true },
+      output: { text: true, audio: false, image: false, video: false, pdf: false },
+      interleaved: false,
+    },
+    cost: { input: 0, output: 0, cache: { read: 0, write: 0 } },
+    limit: { context: 128000, output: 8192 },
+    status: "active",
+    options: {},
+    headers: {},
+  } as any
+
+  test("converts orphaned tool results into assistant text", () => {
+    const result = ProviderTransform.message(
+      [
+        { role: "user", content: "continue" },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-missing",
+              toolName: "task",
+              output: { type: "text", value: '<task id="ses_child" state="completed"></task>' },
+            },
+          ],
+        },
+      ] as any,
+      model,
+      {},
+    ) as any[]
+
+    expect(result).toEqual([
+      { role: "user", content: "continue" },
+      {
+        role: "assistant",
+        content: 'Historical output from the task tool:\n<task id="ses_child" state="completed"></task>',
+      },
+    ])
+  })
+
+  test("converts assistant tool results into assistant text", () => {
+    const result = ProviderTransform.message(
+      [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "done" },
+            {
+              type: "tool-result",
+              toolCallId: "call-result",
+              toolName: "task",
+              output: { type: "text", value: '<task id="ses_child" state="completed"></task>' },
+            },
+          ],
+        },
+      ] as any,
+      model,
+      {},
+    ) as any[]
+
+    expect(result).toEqual([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "done" },
+          { type: "text", text: 'Historical output from the task tool:\n<task id="ses_child" state="completed"></task>' },
+        ],
+      },
+    ])
+  })
+
+  test("keeps matching tool results adjacent to their tool calls", () => {
+    const result = ProviderTransform.message(
+      [
+        {
+          role: "assistant",
+          content: [{ type: "tool-call", toolCallId: "call-1", toolName: "bash", input: { cmd: "pwd" } }],
+        },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-1",
+              toolName: "bash",
+              output: { type: "text", value: "/tmp" },
+            },
+          ],
+        },
+      ] as any,
+      model,
+      {},
+    ) as any[]
+
+    expect(result[1]).toEqual({
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          toolCallId: "call-1",
+          toolName: "bash",
+          output: { type: "text", value: "/tmp" },
+        },
+      ],
+    })
+  })
+
+  test("converts orphaned tool results for anthropic targets", () => {
+    const result = ProviderTransform.message(
+      [
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-missing",
+              toolName: "task",
+              output: { type: "text", value: '<task id="ses_child" state="completed"></task>' },
+            },
+          ],
+        },
+      ] as any,
+      {
+        ...model,
+        api: {
+          ...model.api,
+          npm: "@ai-sdk/anthropic",
+        },
+      },
+      {},
+    ) as any[]
+
+    expect(result).toMatchObject([
+      {
+        role: "assistant",
+        content: 'Historical output from the task tool:\n<task id="ses_child" state="completed"></task>',
+      },
+    ])
+  })
+})
+
 describe("ProviderTransform.options - minimax m3 thinking", () => {
   const createModel = (npm: string) =>
     ({
@@ -2070,12 +2226,12 @@ describe("ProviderTransform.message - surrogate sanitization", () => {
     expect(result[3].content).toBe(expected("assistant string"))
     expect(result[4].content[0].text).toBe(expected("assistant text"))
     expect(result[4].content[1].text).toBe(expected("assistant reasoning"))
-    expect(result[4].content[3].output.value).toBe(expected("assistant tool text"))
-    expect(result[4].content[4].output.value).toBe(expected("assistant tool error"))
-    expect(result[4].content[5].output.value[0].text).toBe(expected("assistant tool content"))
-    expect(result[5].content[0].output.value).toBe(expected("tool text"))
-    expect(result[5].content[1].output.value).toBe(expected("tool error"))
-    expect(result[5].content[2].output.value[0].text).toBe(expected("tool content"))
+    expect(result[4].content[3].text).toContain(expected("assistant tool text"))
+    expect(result[4].content[4].text).toContain(expected("assistant tool error"))
+    expect(result[4].content[5].text).toContain(expected("assistant tool content"))
+    expect(result[5].content).toContain(expected("tool text"))
+    expect(result[5].content).toContain(expected("tool error"))
+    expect(result[5].content).toContain(expected("tool content"))
     expect(result[2].content[1]).toEqual({ type: "image", image: "data:image/png;base64,abcd" })
   })
 })

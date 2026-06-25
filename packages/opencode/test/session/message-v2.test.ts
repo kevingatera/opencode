@@ -111,6 +111,30 @@ function basePart(messageID: string, id: string) {
   }
 }
 
+describe("session.message-v2.sanitizeAssistantText", () => {
+  test("drops protocol-only textual tool markup", () => {
+    expect(MessageV2.sanitizeAssistantText("Tool result 2 todos:\n[]\n<function_calls>")).toBe("")
+  })
+
+  test("preserves safe assistant text before textual tool markup", () => {
+    expect(
+      MessageV2.sanitizeAssistantText(
+        "The subagents completed the rename work but left one failing test.Tool result 3 todos:\n[]\n<function_calls>",
+      ),
+    ).toBe("The subagents completed the rename work but left one failing test.")
+  })
+
+  test("holds partial textual tool markup while streaming", () => {
+    expect(MessageV2.sanitizeAssistantTextForStream("Safe text.Tool res")).toBe("Safe text.")
+    expect(MessageV2.sanitizeAssistantTextForStream("Safe text.Tool result 3 todos")).toBe("Safe text.")
+    expect(MessageV2.sanitizeAssistantTextForStream("Safe text.Tool result 3 todos:")).toBe("Safe text.")
+    expect(MessageV2.sanitizeAssistantTextForStream("Safe text.<function")).toBe("Safe text.")
+    expect(MessageV2.sanitizeAssistantTextForStream("Normal sentence about a tool result")).toBe(
+      "Normal sentence about a tool result",
+    )
+  })
+})
+
 describe("session.message-v2.toModelMessage", () => {
   test("filters out messages with no parts", async () => {
     const input: SessionV1.WithParts[] = [
@@ -411,6 +435,160 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("converts recovered task output into assistant text", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const output = '<task id="ses_child" state="completed">\n<task_result>\ndone\n</task_result>\n</task>'
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "continue",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "task",
+            state: {
+              status: "completed",
+              input: { description: "child task" },
+              output,
+              title: "child task",
+              metadata: { recovered: true },
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "continue" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: output }],
+      },
+    ])
+  })
+
+  test("converts legacy recovered task output into assistant text", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const output = [
+      '<task id="ses_child" state="completed">',
+      "<summary>Recovered task completed: child task</summary>",
+      "<task_result>",
+      "done",
+      "</task_result>",
+      "</task>",
+    ].join("\n")
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "continue",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "task",
+            state: {
+              status: "completed",
+              input: { description: "child task" },
+              output,
+              title: "child task",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "continue" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: output }],
+      },
+    ])
+  })
+
+  test("converts unfinished task output into assistant text", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const output = '<task id="ses_child" state="completed">\n<task_result>\ndone\n</task_result>\n</task>'
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "continue",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "task",
+            state: {
+              status: "completed",
+              input: { description: "child task" },
+              output,
+              title: "child task",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "continue" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: output }],
+      },
+    ])
+  })
+
   test("preserves jpeg tool-result media for anthropic models", async () => {
     const anthropicModel: Provider.Model = {
       ...model,
@@ -448,7 +626,10 @@ describe("session.message-v2.toModelMessage", () => {
         ] as SessionV1.Part[],
       },
       {
-        info: assistantInfo(assistantID, userID),
+        info: assistantInfo(assistantID, userID, undefined, {
+          providerID: anthropicModel.providerID,
+          modelID: anthropicModel.id,
+        }),
         parts: [
           {
             ...basePart(assistantID, "a1-anthropic"),
@@ -661,27 +842,171 @@ describe("session.message-v2.toModelMessage", () => {
         content: [
           { type: "text", text: "done" },
           { type: "text", text: "thinking" },
-          {
-            type: "tool-call",
-            toolCallId: "call-1",
-            toolName: "bash",
-            input: { cmd: "ls" },
-            providerExecuted: undefined,
-          },
-        ],
-      },
-      {
-        role: "tool",
-        content: [
-          {
-            type: "tool-result",
-            toolCallId: "call-1",
-            toolName: "bash",
-            output: { type: "text", value: "ok" },
-          },
+          { type: "text", text: "Historical output from the Bash tool:\nok" },
         ],
       },
     ])
+  })
+
+  test("converts different-model tool output into assistant text", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID, undefined, {
+          providerID: "kimi-coding",
+          modelID: "kimi-k2.7-code",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "tool_1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "pwd" },
+              output: "/tmp",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, model)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Historical output from the Bash tool:\n/tmp" }],
+      },
+    ])
+  })
+
+  test("converts different-model tool output into assistant text for anthropic targets", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const minimaxModel: Provider.Model = {
+      ...model,
+      id: ModelV2.ID.make("opencode-go/minimax-m3"),
+      providerID: ProviderV2.ID.make("opencode-go"),
+      api: {
+        id: "minimax-m3",
+        url: "https://api.minimax.com/anthropic/v1",
+        npm: "@ai-sdk/anthropic",
+      },
+    }
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID, undefined, {
+          providerID: "kimi-coding",
+          modelID: "kimi-k2.7-code",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "tool_1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "pwd" },
+              output: "/tmp",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    expect(await MessageV2.toModelMessages(input, minimaxModel)).toStrictEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "run tool" }],
+      },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: "Historical output from the Bash tool:\n/tmp" }],
+      },
+    ])
+  })
+
+  test("does not replay different-model tool output with assistant tool-call phrasing", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+    const minimaxModel: Provider.Model = {
+      ...model,
+      id: ModelV2.ID.make("opencode-go/minimax-m3"),
+      providerID: ProviderV2.ID.make("opencode-go"),
+      api: {
+        id: "minimax-m3",
+        url: "https://api.minimax.com/anthropic/v1",
+        npm: "@ai-sdk/anthropic",
+      },
+    }
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [{ ...basePart(userID, "u1"), type: "text", text: "continue" }] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID, undefined, {
+          providerID: "kimi-coding",
+          modelID: "kimi-k2.7-code",
+        }),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "tool_1",
+            tool: "todowrite",
+            state: {
+              status: "completed",
+              input: { todos: [] },
+              output: '[{"content":"Fix test","status":"in_progress","priority":"high"}]',
+              title: "3 todos",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const output = JSON.stringify(await MessageV2.toModelMessages(input, minimaxModel))
+    expect(output).toContain("Historical output from the 3 todos tool")
+    expect(output).not.toContain("Tool result")
+    expect(output).not.toContain("<function_calls>")
   })
 
   test("replaces compacted tool output with placeholder", async () => {

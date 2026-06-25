@@ -71,6 +71,7 @@ interface ProcessorContext extends Input {
   blocked: boolean
   needsCompaction: boolean
   currentText: SessionV1.TextPart | undefined
+  currentTextRaw: string
   reasoningMap: Record<string, SessionV1.ReasoningPart>
 }
 
@@ -110,6 +111,7 @@ const layer = Layer.effect(
         blocked: false,
         needsCompaction: false,
         currentText: undefined,
+        currentTextRaw: "",
         reasoningMap: {},
       }
       let aborted = false
@@ -493,20 +495,27 @@ const layer = Layer.effect(
               time: { start: Date.now() },
               metadata: value.providerMetadata,
             }
+            ctx.currentTextRaw = ""
             yield* session.updatePart(ctx.currentText)
             return
 
           case "text-delta":
             if (!ctx.currentText) return
-            ctx.currentText.text += value.text
+            ctx.currentTextRaw += value.text
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
-            yield* session.updatePartDelta({
-              sessionID: ctx.currentText.sessionID,
-              messageID: ctx.currentText.messageID,
-              partID: ctx.currentText.id,
-              field: "text",
-              delta: value.text,
-            })
+            {
+              const text = MessageV2.sanitizeAssistantTextForStream(ctx.currentTextRaw)
+              const delta = text.slice(ctx.currentText.text.length)
+              ctx.currentText.text = text
+              if (!delta) return
+              yield* session.updatePartDelta({
+                sessionID: ctx.currentText.sessionID,
+                messageID: ctx.currentText.messageID,
+                partID: ctx.currentText.id,
+                field: "text",
+                delta,
+              })
+            }
             return
 
           case "text-end":
@@ -520,8 +529,9 @@ const layer = Layer.effect(
                 messageID: ctx.assistantMessage.id,
                 partID: ctx.currentText.id,
               },
-              { text: ctx.currentText.text },
+              { text: ctx.currentTextRaw },
             )).text
+            ctx.currentText.text = MessageV2.sanitizeAssistantText(ctx.currentText.text)
             {
               const end = Date.now()
               ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
@@ -529,6 +539,7 @@ const layer = Layer.effect(
             if (value.providerMetadata) ctx.currentText.metadata = value.providerMetadata
             yield* session.updatePart(ctx.currentText)
             ctx.currentText = undefined
+            ctx.currentTextRaw = ""
             return
 
           case "finish":
@@ -555,8 +566,10 @@ const layer = Layer.effect(
         if (ctx.currentText) {
           const end = Date.now()
           ctx.currentText.time = { start: ctx.currentText.time?.start ?? end, end }
+          ctx.currentText.text = MessageV2.sanitizeAssistantText(ctx.currentTextRaw)
           yield* session.updatePart(ctx.currentText)
           ctx.currentText = undefined
+          ctx.currentTextRaw = ""
         }
 
         for (const part of Object.values(ctx.reasoningMap)) {

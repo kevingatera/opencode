@@ -12,6 +12,7 @@ import {
   OutputLengthError,
   Part,
   SubtaskPart,
+  ToolPart,
   User,
   WithParts,
 } from "@opencode-ai/core/v1/session"
@@ -22,8 +23,10 @@ import { Database } from "@opencode-ai/core/database/database"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { NotFoundError } from "@/storage/storage"
 import { and } from "drizzle-orm"
+import { asc } from "drizzle-orm"
 import { desc } from "drizzle-orm"
 import { eq } from "drizzle-orm"
+import { gt } from "drizzle-orm"
 import { inArray } from "drizzle-orm"
 import { lt } from "drizzle-orm"
 import { or } from "drizzle-orm"
@@ -50,6 +53,87 @@ function truncateToolOutput(text: string, maxChars?: number) {
   if (!maxChars || text.length <= maxChars) return text
   const omitted = text.length - maxChars
   return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+}
+
+function recoveredTaskOutput(part: ToolPart, message: Assistant) {
+  if (part.tool !== "task") return
+  // Older recovery builds wrote the summary before adding metadata.recovered.
+  // Keep those sessions provider-safe without mutating the local database.
+  if (
+    part.state.status === "completed" &&
+    (part.state.metadata?.recovered === true ||
+      part.state.output.includes("<summary>Recovered task completed:") ||
+      (!message.finish && part.state.output.startsWith("<task id=")))
+  )
+    return part.state.output
+  if (part.state.status === "error" && part.state.metadata?.recovered === true) return part.state.error
+}
+
+function toolOutputText(part: ToolPart, maxChars?: number) {
+  if (part.state.status === "completed") {
+    const output = part.state.time.compacted
+      ? "[Old tool result content cleared]"
+      : truncateToolOutput(part.state.output, maxChars)
+    return `Historical output from the ${part.state.title ?? part.tool} tool:\n${output}`
+  }
+  if (part.state.status === "error") return `Historical error from the ${part.tool} tool:\n${part.state.error}`
+  if (part.state.status === "running")
+    return `Historical interrupted ${part.state.title ?? part.tool} tool execution:\n[Tool execution was interrupted]`
+  return `Historical interrupted ${part.tool} tool execution:\n[Tool execution was interrupted]`
+}
+
+function replaysForeignToolsAsText(model: Provider.Model) {
+  if (model.api.npm === "@ai-sdk/anthropic") return true
+  if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
+  if (model.api.npm === "@ai-sdk/openai") return true
+  if (model.api.npm === "@ai-sdk/azure") return true
+  if (model.api.npm === "@ai-sdk/openai-compatible") return true
+  if (model.api.npm === "@openrouter/ai-sdk-provider") return true
+  if (model.api.npm === "ai-gateway-provider") return true
+  return false
+}
+
+export function sanitizeAssistantText(text: string) {
+  const marker = malformedTextualToolMarkupIndex(text)
+  if (marker === undefined) return text
+  return text.slice(0, marker).trim()
+}
+
+export function sanitizeAssistantTextForStream(text: string) {
+  const marker = malformedTextualToolMarkupIndex(text)
+  if (marker !== undefined) return text.slice(0, marker).trim()
+
+  const pending = pendingTextualToolMarkupIndex(text)
+  if (pending === undefined) return text
+  return text.slice(0, pending)
+}
+
+function malformedTextualToolMarkupIndex(text: string) {
+  const matches = [
+    text.search(/<function_calls>|<\/function_calls>|<invoke\s+name=|<\/invoke>|<parameter\s+name=|<\/parameter>/i),
+    text.search(/\bTool result\s+\d+\s+[^:\n]{1,80}:/),
+  ].filter((index) => index >= 0)
+  if (matches.length === 0) return
+  return Math.min(...matches)
+}
+
+function pendingTextualToolMarkupIndex(text: string) {
+  const lower = text.toLowerCase()
+  const tags = ["<function_calls>", "</function_calls>", "<invoke name=", "</invoke>", "<parameter name=", "</parameter>"]
+  const matches = tags
+    .flatMap((tag) =>
+      Array.from({ length: Math.min(tag.length - 1, text.length) }, (_, index) => index + 1)
+        .filter((length) => lower.endsWith(tag.slice(0, length)))
+        .map((length) => text.length - length),
+    )
+    .concat(
+      Array.from({ length: Math.min("Tool result".length - 1, text.length) }, (_, index) => index + 1)
+        .filter((length) => text.endsWith("Tool result".slice(0, length)))
+        .map((length) => text.length - length),
+    )
+    .concat(text.match(/\bTool result(?:\s+\d*)?(?:\s+[^:\n]{0,80})?$/)?.index ?? [])
+  if (matches.length === 0) return
+  return Math.min(...matches)
 }
 
 export const Event = {
@@ -94,6 +178,9 @@ const part = (row: typeof PartTable.$inferSelect) =>
 
 const older = (row: Cursor) =>
   or(lt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), lt(MessageTable.id, row.id)))
+
+const newer = (row: Cursor) =>
+  or(gt(MessageTable.time_created, row.time), and(eq(MessageTable.time_created, row.time), gt(MessageTable.id, row.id)))
 
 function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$inferSelect)[]) {
   const ids = rows.map((row) => row.id)
@@ -279,7 +366,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           const text = part.text === "" && hasSignedReasoning ? " " : part.text
           assistantMessage.parts.push({
             type: "text",
-            text,
+            text: sanitizeAssistantText(text),
             ...(differentModel ? {} : { providerMetadata: part.metadata }),
           })
         }
@@ -288,6 +375,21 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
             type: "step-start",
           })
         if (part.type === "tool") {
+          const recovered = recoveredTaskOutput(part, msg.info)
+          if (recovered !== undefined) {
+            assistantMessage.parts.push({
+              type: "text",
+              text: recovered,
+            })
+            continue
+          }
+          if (differentModel && replaysForeignToolsAsText(model)) {
+            assistantMessage.parts.push({
+              type: "text",
+              text: toolOutputText(part, options?.toolOutputMaxChars),
+            })
+            continue
+          }
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
@@ -426,17 +528,22 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   sessionID: SessionID
   limit: number
   before?: string
+  order?: "asc" | "desc"
 }) {
   const { db } = yield* Database.Service
   const before = input.before ? cursor.decode(input.before) : undefined
+  const order = input.order ?? "desc"
   const where = before
-    ? and(eq(MessageTable.session_id, input.sessionID), older(before))
+    ? and(eq(MessageTable.session_id, input.sessionID), order === "asc" ? newer(before) : older(before))
     : eq(MessageTable.session_id, input.sessionID)
   const rows = yield* db
     .select()
     .from(MessageTable)
     .where(where)
-    .orderBy(desc(MessageTable.time_created), desc(MessageTable.id))
+    .orderBy(
+      order === "asc" ? asc(MessageTable.time_created) : desc(MessageTable.time_created),
+      order === "asc" ? asc(MessageTable.id) : desc(MessageTable.id),
+    )
     .limit(input.limit + 1)
     .all()
     .pipe(Effect.orDie)
@@ -457,7 +564,7 @@ export const page = Effect.fn("MessageV2.page")(function* (input: {
   const more = rows.length > input.limit
   const slice = more ? rows.slice(0, input.limit) : rows
   const items = yield* hydrate(db, slice)
-  items.reverse()
+  if (order === "desc") items.reverse()
   const tail = slice.at(-1)
   return {
     items,

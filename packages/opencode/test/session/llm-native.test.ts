@@ -296,6 +296,64 @@ describe("session.llm-native.request", () => {
     ])
   })
 
+  test("converts orphaned tool results into assistant text", () => {
+    const request = LLMNative.request({
+      model: baseModel,
+      messages: [
+        { role: "user", content: "continue" },
+        {
+          role: "tool",
+          content: [
+            {
+              type: "tool-result",
+              toolCallId: "call-missing",
+              toolName: "task",
+              output: { type: "text", value: '<task id="ses_child" state="completed"></task>' },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(request.messages).toMatchObject([
+      { role: "user", content: [{ type: "text", text: "continue" }] },
+      {
+        role: "assistant",
+        content: [{ type: "text", text: 'Historical output from the task tool:\n<task id="ses_child" state="completed"></task>' }],
+      },
+    ])
+  })
+
+  test("converts assistant tool results into assistant text", () => {
+    const request = LLMNative.request({
+      model: baseModel,
+      messages: [
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "done" },
+            {
+              type: "tool-result",
+              toolCallId: "call-result",
+              toolName: "task",
+              output: { type: "text", value: '<task id="ses_child" state="completed"></task>' },
+            },
+          ],
+        },
+      ],
+    })
+
+    expect(request.messages).toMatchObject([
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "done" },
+          { type: "text", text: 'Historical output from the task tool:\n<task id="ses_child" state="completed"></task>' },
+        ],
+      },
+    ])
+  })
+
   test("maps stored provider metadata to native content metadata", () => {
     const reasoning = Object.assign(
       { type: "reasoning" as const, text: "thinking" },

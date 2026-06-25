@@ -97,6 +97,84 @@ function sdkKey(npm: string): string | undefined {
   return undefined
 }
 
+function needsAdjacentToolResults(model: Provider.Model) {
+  if (model.api.npm === "@ai-sdk/anthropic") return true
+  if (model.api.npm === "@ai-sdk/google-vertex/anthropic") return true
+  if (model.api.npm === "@ai-sdk/openai") return true
+  if (model.api.npm === "@ai-sdk/azure") return true
+  if (model.api.npm === "@ai-sdk/openai-compatible") return true
+  if (model.api.npm === "@openrouter/ai-sdk-provider") return true
+  if (model.api.npm === "ai-gateway-provider") return true
+  return false
+}
+
+function toolResultText(part: ToolResultPart) {
+  const prefix = `Historical output from the ${part.toolName || part.toolCallId} tool:`
+  if (part.output.type === "text" || part.output.type === "error-text") return `${prefix}\n${part.output.value}`
+  if (part.output.type === "content") {
+    const text = part.output.value
+      .filter((item): item is { type: "text"; text: string } => item.type === "text")
+      .map((item) => item.text)
+      .join("\n")
+    return text ? `${prefix}\n${text}` : prefix
+  }
+  return `${prefix}\n${JSON.stringify(part.output)}`
+}
+
+function repairOrphanedToolResults(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
+  if (!needsAdjacentToolResults(model)) return msgs
+
+  const result: ModelMessage[] = []
+  let pending = new Set<string>()
+
+  for (const msg of msgs) {
+    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+      const orphaned = msg.content.filter((part): part is ToolResultPart => part.type === "tool-result")
+      const content = msg.content.filter((part) => part.type !== "tool-result")
+      const repaired = [
+        ...content,
+        ...orphaned.map((part) => ({
+          type: "text" as const,
+          text: toolResultText(part),
+        })),
+      ]
+      pending = new Set(
+        repaired.flatMap((part) => (part.type === "tool-call" ? [part.toolCallId] : [])),
+      )
+      result.push({ ...msg, content: repaired })
+      continue
+    }
+
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) {
+      pending = new Set()
+      result.push(msg)
+      continue
+    }
+
+    const valid: ToolResultPart[] = []
+    const orphaned: ToolResultPart[] = []
+    for (const part of msg.content) {
+      if (part.type !== "tool-result") continue
+      if (pending.has(part.toolCallId)) {
+        valid.push(part)
+        pending.delete(part.toolCallId)
+        continue
+      }
+      orphaned.push(part)
+    }
+
+    if (valid.length > 0) result.push({ ...msg, content: valid })
+    if (orphaned.length > 0) {
+      result.push({
+        role: "assistant",
+        content: orphaned.map(toolResultText).join("\n\n"),
+      })
+    }
+  }
+
+  return result
+}
+
 // TODO: fix this stupid inefficient dogshit function
 function normalizeMessages(
   msgs: ModelMessage[],
@@ -352,7 +430,7 @@ function normalizeMessages(
     })
   }
 
-  return msgs
+  return repairOrphanedToolResults(msgs, model)
 }
 
 function applyCaching(msgs: ModelMessage[], model: Provider.Model): ModelMessage[] {
