@@ -509,6 +509,21 @@
         "typescript": "catalog:",
       },
     },
+    "packages/goal": {
+      "name": "opencode-goal-plugin",
+      "version": "1.17.7",
+      "dependencies": {
+        "@opencode-ai/plugin": "workspace:*",
+        "@opencode-ai/sdk": "workspace:*",
+        "@opentui/solid": "catalog:",
+        "solid-js": "catalog:",
+      },
+      "devDependencies": {
+        "@tsconfig/bun": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+      },
+    },
     "packages/http-recorder": {
       "name": "@opencode-ai/http-recorder",
       "version": "1.18.25",
@@ -684,6 +699,7 @@
         "@types/yargs": "17.0.33",
         "@typescript/native-preview": "catalog:",
         "drizzle-orm": "catalog:",
+        "opencode-goal-plugin": "workspace:*",
         "prettier": "3.6.2",
         "typescript": "catalog:",
         "vscode-languageserver-types": "3.17.5",
@@ -4611,6 +4627,8 @@
     "opencode": ["opencode@workspace:packages/opencode"],
 
     "opencode-gitlab-auth": ["opencode-gitlab-auth@2.1.0", "", { "dependencies": { "@fastify/rate-limit": "^10.2.0", "@opencode-ai/plugin": "*", "fastify": "^5.2.0", "open": "^10.0.0" } }, "sha512-ZCDYaY0V8Se6hOH2tqZqqcskrd0xLTgfiGhU0J1igkUP52oFtN9eSwxOPLT0ctvNXUq8b+zOmJ4sskAQoC/IUA=="],
+
+    "opencode-goal-plugin": ["opencode-goal-plugin@workspace:packages/goal"],
 
     "opencode-poe-auth": ["opencode-poe-auth@0.0.1", "", { "dependencies": { "open": "^10.0.0", "poe-oauth": "*" }, "peerDependencies": { "@opencode-ai/plugin": "*" } }, "sha512-cXqTlS6AXHzo1oBdosnxbT47ZJEZ9WXn050X8Re6wZ1vaNnTpB/l2fMQt90evT7RBK0fB8UjXQUDMKyd7bbiqg=="],
 
