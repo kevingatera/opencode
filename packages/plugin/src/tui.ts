@@ -324,6 +324,8 @@ export type TuiThemeCurrent = {
   readonly diffHunkHeader: RGBA
   readonly diffHighlightAdded: RGBA
   readonly diffHighlightRemoved: RGBA
+  readonly diffHighlightAddedBg: RGBA
+  readonly diffHighlightRemovedBg: RGBA
   readonly diffAddedBg: RGBA
   readonly diffRemovedBg: RGBA
   readonly diffContextBg: RGBA

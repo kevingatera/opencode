@@ -51,6 +51,8 @@ function themeCurrent(): HostPluginApi["theme"]["current"] {
     diffHunkHeader: b,
     diffHighlightAdded: f,
     diffHighlightRemoved: d,
+    diffHighlightAddedBg: h,
+    diffHighlightRemovedBg: h,
     diffAddedBg: h,
     diffRemovedBg: h,
     diffContextBg: h,
