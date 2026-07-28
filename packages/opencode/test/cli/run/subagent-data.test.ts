@@ -4,7 +4,6 @@ import { entryBody } from "@/cli/cmd/run/entry.body"
 import {
   bootstrapSubagentCalls,
   bootstrapSubagentData,
-  clearFinishedSubagents,
   createSubagentData,
   reduceSubagentData,
   snapshotSubagentData,
@@ -50,7 +49,19 @@ function reduce(data: ReturnType<typeof createSubagentData>, event: unknown) {
   })
 }
 
-function taskMessage(sessionID: string, status: "running" | "completed" = "completed"): SessionMessage {
+function taskMetadata(sessionID: string, resumed?: boolean) {
+  return {
+    sessionId: sessionID,
+    toolcalls: 4,
+    ...(resumed ? { resumed: true } : {}),
+  }
+}
+
+function taskMessage(
+  sessionID: string,
+  status: "running" | "completed" | "interrupted" = "completed",
+  opts: { resumed?: boolean } = {},
+): SessionMessage {
   if (status === "running") {
     return {
       parts: [
@@ -68,11 +79,36 @@ function taskMessage(sessionID: string, status: "running" | "completed" = "compl
               subagent_type: "explore",
             },
             title: "Reducer touchpoints",
-            metadata: {
-              sessionId: sessionID,
-              toolcalls: 4,
-            },
+            metadata: taskMetadata(sessionID, opts.resumed),
             time: { start: 1 },
+          },
+        },
+      ],
+    }
+  }
+
+  if (status === "interrupted") {
+    return {
+      parts: [
+        {
+          id: `part-${sessionID}`,
+          sessionID: "parent-1",
+          messageID: `msg-${sessionID}`,
+          type: "tool",
+          callID: `call-${sessionID}`,
+          tool: "task",
+          state: {
+            status: "error",
+            input: {
+              description: "Scan reducer paths",
+              subagent_type: "explore",
+            },
+            error: "Tool execution aborted",
+            metadata: {
+              ...taskMetadata(sessionID, opts.resumed),
+              interrupted: true,
+            },
+            time: { start: 1, end: 2 },
           },
         },
       ],
@@ -96,10 +132,7 @@ function taskMessage(sessionID: string, status: "running" | "completed" = "compl
           },
           output: "",
           title: "Reducer touchpoints",
-          metadata: {
-            sessionId: sessionID,
-            toolcalls: 4,
-          },
+          metadata: taskMetadata(sessionID, opts.resumed),
           time: { start: 1, end: 2 },
         },
       },
@@ -232,6 +265,44 @@ describe("run subagent data", () => {
     })
     expect(snapshot.permissions.map((item) => item.id)).toEqual(["perm-1"])
     expect(snapshot.questions.map((item) => item.id)).toEqual(["question-1"])
+  })
+
+  test("marks interrupted task tabs as cancelled during bootstrap", () => {
+    const data = createSubagentData()
+
+    bootstrapSubagentData({
+      data,
+      messages: [taskMessage("child-1", "interrupted")],
+      children: [{ id: "child-1" }],
+      permissions: [],
+      questions: [],
+    })
+
+    expect(snapshotSubagentData(data).tabs).toEqual([
+      expect.objectContaining({
+        sessionID: "child-1",
+        status: "cancelled",
+      }),
+    ])
+  })
+
+  test("marks resumed task tabs during bootstrap", () => {
+    const data = createSubagentData()
+
+    bootstrapSubagentData({
+      data,
+      messages: [taskMessage("child-1", "running", { resumed: true })],
+      children: [{ id: "child-1" }],
+      permissions: [],
+      questions: [],
+    })
+
+    expect(snapshotSubagentData(data).tabs).toEqual([
+      expect.objectContaining({
+        sessionID: "child-1",
+        resumed: true,
+      }),
+    ])
   })
 
   test("captures child activity and blocker metadata in the footer detail state", () => {
@@ -437,20 +508,64 @@ describe("run subagent data", () => {
     ])
   })
 
-  test("clears finished tabs on the next parent prompt", () => {
+  test("marks a running tab cancelled when the child session aborts", () => {
     const data = createSubagentData()
 
     bootstrapSubagentData({
       data,
-      messages: [taskMessage("child-1", "completed"), taskMessage("child-2", "running")],
-      children: [{ id: "child-1" }, { id: "child-2" }],
+      messages: [taskMessage("child-1", "running")],
+      children: [{ id: "child-1" }],
       permissions: [],
       questions: [],
     })
 
-    expect(clearFinishedSubagents(data)).toBe(true)
+    reduce(data, {
+      type: "message.updated",
+      properties: {
+        sessionID: "child-1",
+        info: {
+          id: "msg-assistant-1",
+          sessionID: "child-1",
+          role: "assistant",
+          time: {
+            created: 1,
+            completed: 2,
+          },
+          error: {
+            name: "MessageAbortedError",
+            data: {
+              message: "Aborted",
+            },
+          },
+          parentID: "msg-user-1",
+          providerID: "openai",
+          modelID: "gpt-5",
+          mode: "default",
+          agent: "explore",
+          path: {
+            cwd: "/tmp",
+            root: "/tmp",
+          },
+          cost: 0,
+          tokens: {
+            input: 1,
+            output: 1,
+            reasoning: 0,
+            cache: {
+              read: 0,
+              write: 0,
+            },
+          },
+          finish: "error",
+        },
+      },
+    })
+
     expect(snapshotSubagentData(data).tabs).toEqual([
-      expect.objectContaining({ sessionID: "child-2", status: "running" }),
+      expect.objectContaining({
+        sessionID: "child-1",
+        status: "cancelled",
+      }),
     ])
   })
 })

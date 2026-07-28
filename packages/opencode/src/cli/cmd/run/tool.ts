@@ -367,10 +367,12 @@ function runTask(p: ToolProps<typeof TaskTool>): ToolInline {
   const kind = Locale.titlecase(p.input.subagent_type || "unknown")
   const desc = p.input.description
   const icon = p.frame.status === "error" ? "✗" : p.frame.status === "running" ? "•" : "✓"
+  const label = `${kind} Agent${p.metadata.resumed === true ? " · resumed" : ""}`
+  const suffix = p.metadata.resumed === true ? " · resumed" : ""
   return {
     icon,
-    title: desc || `${kind} Task`,
-    description: desc ? `${kind} Agent` : undefined,
+    title: `${desc || `${kind} Task`}${suffix}`,
+    description: desc ? label : p.metadata.resumed === true ? "resumed" : undefined,
   }
 }
 
@@ -500,6 +502,19 @@ function patchTitle(file: PatchFile): string {
 function snapWrite(p: ToolProps<typeof WriteTool>): ToolSnapshot | undefined {
   const file = p.input.filePath || ""
   const content = p.input.content || ""
+  const diff = p.metadata.diff || ""
+  if (file && diff.trim()) {
+    return {
+      kind: "diff",
+      items: [
+        {
+          title: `# Wrote ${toolPath(file)}`,
+          diff,
+          file,
+        },
+      ],
+    }
+  }
   if (!file && !content) {
     return undefined
   }
@@ -573,10 +588,11 @@ function snapTask(p: ToolProps<typeof TaskTool>): ToolSnapshot {
   const desc = p.input.description
   const title = text(p.frame.state.title)
   const rows = [desc || title].filter((item): item is string => Boolean(item))
+  const suffix = p.metadata.resumed === true ? " · resumed" : ""
 
   return {
     kind: "task",
-    title: `# ${kind} Task`,
+    title: `# ${kind} Task${suffix}`,
     rows,
     tail: "",
   }
@@ -623,20 +639,18 @@ function snapQuestion(p: ToolProps<typeof QuestionTool>): ToolSnapshot {
 
 function scrollBashStart(p: ToolProps<typeof BashTool>): string {
   const cmd = p.input.command ?? ""
-  const desc = p.input.description || "Shell"
   const wd = p.input.workdir ?? ""
-  const dir = wd && wd !== "." ? toolPath(wd) : ""
-  if (cmd && desc === "Shell" && !dir) {
+  const formatted = wd && wd !== "." ? toolPath(wd) : ""
+  const dir = formatted === "." ? "" : formatted
+  if (cmd && !dir) {
     return `$ ${cmd}`
   }
 
-  const title = dir && !desc.includes(dir) ? `${desc} in ${dir}` : desc
-
   if (!cmd) {
-    return `# ${title}`
+    return dir ? `# Running in ${dir}` : ""
   }
 
-  return `# ${title}\n$ ${cmd}`
+  return `# Running in ${dir}\n$ ${cmd}`
 }
 
 function scrollBashProgress(p: ToolProps<typeof BashTool>): string {
@@ -783,11 +797,12 @@ function scrollTaskFinal(p: ToolProps<typeof TaskTool>): string {
 
   const kind = Locale.titlecase(p.input.subagent_type || "general")
   const row = p.input.description || text(p.frame.state.title)
+  const suffix = p.metadata.resumed === true ? " · resumed" : ""
   if (!row) {
-    return `# ${kind} Task`
+    return `# ${kind} Task${suffix}`
   }
 
-  return `# ${kind} Task\n${row}`
+  return `# ${kind} Task${suffix}\n${row}`
 }
 
 function scrollTodoStart(_: ToolProps<typeof TodoWriteTool>): string {
@@ -968,11 +983,10 @@ function permList(p: ToolPermissionProps): ToolPermissionInfo {
 }
 
 function permBash(p: ToolPermissionProps<typeof BashTool>): ToolPermissionInfo {
-  const title = p.input.description || "Shell command"
   const cmd = p.input.command || ""
   return {
     icon: "#",
-    title,
+    title: "Shell command",
     lines: cmd ? [`$ ${cmd}`] : p.patterns.map((item) => `- ${item}`),
   }
 }
@@ -1050,7 +1064,7 @@ const TOOL_RULES = {
     view: {
       output: false,
       final: true,
-      snap: "code",
+      snap: "structured",
     },
     run: runWrite,
     snap: snapWrite,

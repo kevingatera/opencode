@@ -9,6 +9,8 @@ function footer() {
   const api: FooterApi = {
     isClosed: false,
     onPrompt: () => () => {},
+    onSubagentPrompt: () => () => {},
+    onQueuedRemove: () => () => {},
     onClose: () => () => {},
     event: (next) => {
       events.push(next)

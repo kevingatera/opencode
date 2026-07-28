@@ -1,18 +1,24 @@
 /** @jsxImportSource @opentui/solid */
 import type { ScrollBoxRenderable } from "@opentui/core"
 import { useKeyboard } from "@opentui/solid"
-import "opentui-spinner/solid"
+import { registerOpencodeSpinner } from "@opencode-ai/tui/component/register-spinner"
 import { Show, createMemo, indexArray } from "solid-js"
-import { SPINNER_FRAMES } from "../tui/component/spinner"
+import { SPINNER_FRAMES } from "@opencode-ai/tui/component/spinner"
 import { RunEntryContent, separatorRows } from "./scrollback.writer"
 import type { FooterSubagentDetail, FooterSubagentTab, RunDiffStyle } from "./types"
 import type { RunFooterTheme, RunTheme } from "./theme"
+
+registerOpencodeSpinner()
 
 export const SUBAGENT_INSPECTOR_ROWS = 14
 
 function statusColor(theme: RunFooterTheme, status: FooterSubagentTab["status"]) {
   if (status === "completed") {
     return theme.highlight
+  }
+
+  if (status === "cancelled") {
+    return theme.muted
   }
 
   if (status === "error") {
@@ -25,6 +31,10 @@ function statusColor(theme: RunFooterTheme, status: FooterSubagentTab["status"])
 function statusIcon(status: FooterSubagentTab["status"]) {
   if (status === "completed") {
     return "●"
+  }
+
+  if (status === "cancelled") {
+    return "○"
   }
 
   if (status === "error") {
@@ -44,6 +54,7 @@ export function RunFooterSubagentBody(props: {
   width: () => number
   diffStyle?: RunDiffStyle
   onCycle: (dir: -1 | 1) => void
+  onCompose: () => void
   onClose: () => void
 }) {
   const theme = createMemo(() => props.theme())
@@ -71,7 +82,7 @@ export function RunFooterSubagentBody(props: {
       return ""
     }
 
-    return current.label
+    return [current.label, current.resumed ? "resumed" : undefined].filter(Boolean).join(" · ")
   })
   const rows = indexArray(commits, (commit, index) => (
     <box flexDirection="column" gap={0} flexShrink={0}>
@@ -98,6 +109,12 @@ export function RunFooterSubagentBody(props: {
       return
     }
 
+    if (event.name === "return" || event.name === "i") {
+      event.preventDefault()
+      props.onCompose()
+      return
+    }
+
     if (event.name === "up" || event.name === "k") {
       event.preventDefault()
       scroll?.scrollBy(-1)
@@ -111,13 +128,7 @@ export function RunFooterSubagentBody(props: {
   })
 
   return (
-    <box
-      id="run-direct-footer-subagent"
-      width="100%"
-      height="100%"
-      flexDirection="column"
-      backgroundColor={footer().surface}
-    >
+    <box width="100%" height="100%" flexDirection="column" backgroundColor={footer().surface}>
       <box paddingTop={1} paddingLeft={1} paddingRight={3} paddingBottom={1} flexDirection="column" flexGrow={1}>
         <Show when={tab()}>
           {(current) => (
@@ -142,6 +153,9 @@ export function RunFooterSubagentBody(props: {
                   {props.index()} of {props.total()}
                 </text>
               </Show>
+              <text fg={footer().muted} wrapMode="none" truncate flexShrink={0}>
+                enter/i instruct
+              </text>
             </box>
           )}
         </Show>

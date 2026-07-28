@@ -18,6 +18,16 @@ type ToolInput = {
   readonly inputSchema?: unknown
 }
 
+type StoredToolCallPart = Record<string, unknown> & {
+  readonly type: "tool-call"
+  readonly toolCallId: string
+}
+
+type StoredToolResultPart = Record<string, unknown> & {
+  readonly type: "tool-result"
+  readonly toolCallId: string
+}
+
 export type RequestInput = {
   readonly model: Provider.Model
   readonly apiKey?: string
@@ -77,6 +87,78 @@ const toolResult = (part: Record<string, unknown>) => {
   })
 }
 
+const isToolCallPart = (part: unknown): part is StoredToolCallPart =>
+  isRecord(part) && part.type === "tool-call" && typeof part.toolCallId === "string"
+
+const isToolResultPart = (part: unknown): part is StoredToolResultPart =>
+  isRecord(part) && part.type === "tool-result" && typeof part.toolCallId === "string"
+
+const toolResultText = (part: unknown) => {
+  if (!isRecord(part)) return "Historical tool output:"
+  const output = isRecord(part.output) ? part.output : { type: "json", value: part.output }
+  const prefix = `Historical output from the ${typeof part.toolName === "string" ? part.toolName : part.toolCallId} tool:`
+  if ((output.type === "text" || output.type === "error-text") && typeof output.value === "string")
+    return `${prefix}\n${output.value}`
+  if (output.type === "content" && Array.isArray(output.value)) {
+    const text = output.value
+      .filter((item): item is { type: "text"; text: string } => isRecord(item) && item.type === "text")
+      .map((item) => item.text)
+      .join("\n")
+    return text ? `${prefix}\n${text}` : prefix
+  }
+  return `${prefix}\n${JSON.stringify(output)}`
+}
+
+const repairOrphanedToolResults = (input: readonly ModelMessage[]): ModelMessage[] => {
+  const result: ModelMessage[] = []
+  let pending = new Set<string>()
+
+  for (const message of input) {
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      const orphaned = message.content.filter(isToolResultPart)
+      const content = message.content.filter((part) => !isToolResultPart(part))
+      const repaired = [
+        ...content,
+        ...orphaned.map((part) => ({
+          type: "text" as const,
+          text: toolResultText(part),
+        })),
+      ]
+      pending = new Set(repaired.flatMap((part) => (isToolCallPart(part) ? [part.toolCallId] : [])))
+      result.push({ ...message, content: repaired })
+      continue
+    }
+
+    if (message.role !== "tool" || !Array.isArray(message.content)) {
+      pending = new Set()
+      result.push(message)
+      continue
+    }
+
+    const valid = []
+    const orphaned = []
+    for (const part of message.content) {
+      if (!isToolResultPart(part)) continue
+      if (pending.has(part.toolCallId)) {
+        valid.push(part)
+        pending.delete(part.toolCallId)
+        continue
+      }
+      orphaned.push(part)
+    }
+
+    if (valid.length > 0) result.push({ ...message, content: valid })
+    if (orphaned.length > 0) {
+      result.push({
+        role: "assistant",
+        content: orphaned.map(toolResultText).join("\n\n"),
+      })
+    }
+  }
+
+  return result
+}
+
 const contentPart = (part: unknown) => {
   if (!isRecord(part)) throw new Error("Native LLM request adapter only supports object content parts")
   if (part.type === "text") return textPart(part)
@@ -103,8 +185,9 @@ const content = (value: ModelMessage["content"]) =>
   typeof value === "string" ? [{ type: "text" as const, text: value }] : value.map(contentPart)
 
 const messages = (input: readonly ModelMessage[]) => {
-  const system = input.flatMap((message) => (message.role === "system" ? [SystemPart.make(message.content)] : []))
-  const messages = input.flatMap((message) => {
+  const repaired = repairOrphanedToolResults(input)
+  const system = repaired.flatMap((message) => (message.role === "system" ? [SystemPart.make(message.content)] : []))
+  const messages = repaired.flatMap((message) => {
     if (message.role === "system") return []
     return [
       Message.make({

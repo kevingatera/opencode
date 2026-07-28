@@ -1,17 +1,18 @@
 import { sql } from "drizzle-orm"
 
 export const UPSERT_CHUNK_SIZE = 500
+const DAY_MS = 86_400_000
 
 export type StatGrain = "day" | "week"
 
 export type StatBaseAggregate = {
   grain: StatGrain
-  period_start: Date
-  period_end: Date
+  period_key: string
   dataset: string
   tier: string
   sessions: number
   requests: number
+  unique_users: number
   input_tokens: number
   output_tokens: number
   reasoning_tokens: number
@@ -34,14 +35,14 @@ export type StatBaseAggregate = {
 
 export type StatBaseRow = {
   grain: string
-  period_start: Date
-  period_end: Date
+  period_key: string
   dataset?: string
   tier?: string
   client?: string
   source?: string
   sessions?: number
   requests?: number
+  unique_users?: number
   input_tokens?: number
   output_tokens?: number
   reasoning_tokens?: number
@@ -65,14 +66,14 @@ export type StatBaseRow = {
 export function toStatBaseRow(data: StatBaseAggregate) {
   return {
     grain: data.grain,
-    period_start: data.period_start,
-    period_end: data.period_end,
+    period_key: data.period_key,
     dataset: data.dataset,
     tier: data.tier,
     client: "all",
     source: "all",
     sessions: data.sessions,
     requests: data.requests,
+    unique_users: data.unique_users,
     input_tokens: data.input_tokens,
     output_tokens: data.output_tokens,
     reasoning_tokens: data.reasoning_tokens,
@@ -99,14 +100,7 @@ export function synthesizeAllTierRows<T extends StatBaseRow>(rows: T[], dimensio
     ...rows,
     ...Object.values(
       rows.reduce<Record<string, T>>((result, row) => {
-        const key = [
-          row.grain,
-          row.period_start.toISOString(),
-          row.dataset,
-          row.client,
-          row.source,
-          dimensionKey(row),
-        ].join("\u0000")
+        const key = [row.grain, row.period_key, row.dataset, row.client, row.source, dimensionKey(row)].join("\u0000")
         result[key] = result[key] ? combineRows(result[key], row) : { ...row, tier: "all" }
         return result
       }, {}),
@@ -117,15 +111,9 @@ export function synthesizeAllTierRows<T extends StatBaseRow>(rows: T[], dimensio
 export function collapseRows<T extends StatBaseRow>(rows: T[], dimensionKey: (row: T) => string) {
   return Object.values(
     rows.reduce<Record<string, T>>((result, row) => {
-      const key = [
-        row.grain,
-        row.period_start.toISOString(),
-        row.dataset,
-        row.tier,
-        row.client,
-        row.source,
-        dimensionKey(row),
-      ].join("\u0000")
+      const key = [row.grain, row.period_key, row.dataset, row.tier, row.client, row.source, dimensionKey(row)].join(
+        "\u0000",
+      )
       result[key] = result[key] ? combineRows(result[key], row) : row
       return result
     }, {}),
@@ -135,9 +123,9 @@ export function collapseRows<T extends StatBaseRow>(rows: T[], dimensionKey: (ro
 export function combineRows<T extends StatBaseRow>(left: T, right: T): T {
   return {
     ...left,
-    period_end: right.period_end > left.period_end ? right.period_end : left.period_end,
     sessions: (left.sessions ?? 0) + (right.sessions ?? 0),
     requests: (left.requests ?? 0) + (right.requests ?? 0),
+    unique_users: (left.unique_users ?? 0) + (right.unique_users ?? 0),
     input_tokens: (left.input_tokens ?? 0) + (right.input_tokens ?? 0),
     output_tokens: (left.output_tokens ?? 0) + (right.output_tokens ?? 0),
     reasoning_tokens: (left.reasoning_tokens ?? 0) + (right.reasoning_tokens ?? 0),
@@ -159,18 +147,70 @@ export function combineRows<T extends StatBaseRow>(left: T, right: T): T {
   }
 }
 
+export function isMissingUniqueUsersColumn(cause: unknown): boolean {
+  return errorText(cause).includes("Unknown column 'unique_users'")
+}
+
+export function omitUniqueUsers<T extends { unique_users?: number }>(rows: T[]) {
+  return rows.map((row) => {
+    const result = { ...row }
+    delete result.unique_users
+    return result
+  })
+}
+
 export function statPeriodKey(row: StatBaseRow) {
-  return [row.grain, row.period_start.toISOString(), row.dataset, row.tier, row.client, row.source].join("\u0000")
+  return [row.grain, row.period_key, row.dataset, row.tier, row.client, row.source].join("\u0000")
+}
+
+export function statRowScope(rows: StatBaseRow[]) {
+  if (rows.length === 0) return
+  return {
+    grains: unique(rows.map((row) => row.grain)),
+    periodKeys: unique(rows.map((row) => row.period_key)),
+    datasets: unique(rows.map((row) => row.dataset ?? "all")),
+    clients: unique(rows.map((row) => row.client ?? "all")),
+    sources: unique(rows.map((row) => row.source ?? "all")),
+  }
+}
+
+export function periodKeyFor(grain: StatGrain, periodStart: Date) {
+  if (grain === "week") return isoWeekId(periodStart)
+  return utcDateId(periodStart)
+}
+
+export function startOfUtcDay(value: Date) {
+  return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()))
+}
+
+export function startOfIsoWeek(value: Date) {
+  return new Date(
+    Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate() - (value.getUTCDay() || 7) + 1),
+  )
+}
+
+export function isoWeekId(value: Date) {
+  const thursday = new Date(
+    Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate() + 4 - (value.getUTCDay() || 7)),
+  )
+  return `${thursday.getUTCFullYear()}-W${String(Math.ceil(((thursday.getTime() - Date.UTC(thursday.getUTCFullYear(), 0, 1)) / DAY_MS + 1) / 7)).padStart(2, "0")}`
+}
+
+function utcDateId(value: Date) {
+  return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`
 }
 
 export function rankBy<T extends StatBaseRow>(rows: T[], value: (row: T) => number) {
   return new Map(rows.toSorted((a, b) => value(b) - value(a)).map((row, index) => [row, index + 1]))
 }
 
-export function rankRowsWithMarketShare<T extends StatBaseRow>(rows: T[]) {
+export function rankRowsWithMarketShare<T extends StatBaseRow>(
+  rows: T[],
+  groupKey: (row: T) => string = statPeriodKey,
+) {
   return Object.values(
     rows.reduce<Record<string, T[]>>((result, row) => {
-      const key = statPeriodKey(row)
+      const key = groupKey(row)
       result[key] = [...(result[key] ?? []), row]
       return result
     }, {}),
@@ -206,8 +246,21 @@ export function chunks<T>(items: T[], size: number) {
   )
 }
 
+function unique(values: string[]) {
+  return [...new Set(values)]
+}
+
 export function inserted(column: string) {
   return sql.raw(`values(\`${column}\`)`)
+}
+
+function errorText(cause: unknown): string {
+  if (cause instanceof Error) return `${cause.message} ${errorText((cause as { cause?: unknown }).cause)}`
+  if (typeof cause === "object" && cause)
+    return Object.values(cause as Record<string, unknown>)
+      .map(errorText)
+      .join(" ")
+  return String(cause)
 }
 
 export function weightedAverage(

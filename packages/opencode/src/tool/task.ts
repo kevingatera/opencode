@@ -1,6 +1,7 @@
 import * as Tool from "./tool"
 import DESCRIPTION from "./task.txt"
 import { ToolJsonSchema } from "./json-schema"
+import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { BackgroundJob } from "@/background/job"
 import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
@@ -9,26 +10,44 @@ import { Agent } from "../agent/agent"
 import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
-import { Cause, Effect, Exit, Schema, Scope } from "effect"
+import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { Database } from "@opencode-ai/core/database/database"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
   resolvePromptParts(template: string): Effect.Effect<SessionPrompt.PromptInput["parts"]>
-  prompt(input: SessionPrompt.PromptInput): Effect.Effect<MessageV2.WithParts>
+  prompt(input: SessionPrompt.PromptInput): Effect.Effect<SessionV1.WithParts>
 }
 
 const id = "task"
 const BACKGROUND_DESCRIPTION = [
-  "",
-  "",
-  [
-    "Background mode: background=true launches the subagent asynchronously and returns immediately.",
-    "Foreground is the default; use it when you need the result before continuing.",
-    "Use background only for independent work that can run while you continue elsewhere.",
-    "You will be notified automatically when it finishes.",
-  ].join(" "),
+  "Background mode: background=true launches the subagent asynchronously and returns immediately.",
+  "Foreground is the default; use it when you need the result before continuing.",
+  "Use background only for independent work that can run while you continue elsewhere.",
+  "You will be notified automatically when it finishes.",
+].join(" ")
+const BACKGROUND_STARTED = [
+  "The task is working in the background. You will be notified automatically when it finishes.",
+  "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
+  "Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.",
+].join("\n")
+const BACKGROUND_UPDATED = [
+  "Additional context sent to the running background task.",
+  "The task is still working in the background. You will be notified automatically when it finishes.",
+  "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
+  "Work on non-overlapping tasks, or briefly tell the user what you sent and end your response.",
+].join("\n")
+const SIBLING_TASK_MUTATION_DENIES = [
+  { permission: "edit" as const, pattern: "*" as const, action: "deny" as const },
+  { permission: "bash" as const, pattern: "*" as const, action: "deny" as const },
+]
+const SUBAGENT_HANDOFF = [
+  "Subagent handoff:",
+  "- Remember that you are not alone in this codebase. The parent agent and other subagents may be editing files at the same time.",
+  "- Do not revert, overwrite, or clean up changes you did not make. If you notice unexpected diffs, treat them as someone else's in-progress work and adapt around them.",
+  "- Stay within the task's assigned scope. If code changes are requested, keep edits focused and list every changed file in your final response.",
 ].join("\n")
 
 const BaseParameterFields = {
@@ -37,7 +56,7 @@ const BaseParameterFields = {
   subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
   task_id: Schema.optional(Schema.String).annotate({
     description:
-      "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "Set this to a prior task_id to relay follow-up instructions to the same subagent session instead of creating a fresh one. Use it for commands like continue, also check this, or tell that agent to do X, whether the subagent is running in the background or stopped.",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
 }
@@ -47,40 +66,21 @@ const BaseParameters = Schema.Struct(BaseParameterFields)
 export const Parameters = Schema.Struct({
   ...BaseParameterFields,
   background: Schema.optional(Schema.Boolean).annotate({
-    description: "Run the agent in the background. You will be notified when it completes.",
+    description:
+      "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
   }),
 })
 
-function output(sessionID: SessionID, text: string) {
-  return [`<task id="${sessionID}" state="completed">`, "<task_result>", text, "</task_result>", "</task>"].join("\n")
-}
-
-function backgroundOutput(sessionID: SessionID) {
-  return [
-    `<task id="${sessionID}" state="running">`,
-    "<summary>Background task started</summary>",
-    "<task_result>",
-    "Background task started. You will be notified automatically when it finishes; do not poll for progress.",
-    "Do not duplicate its work. Continue only with non-overlapping work, or stop if there is nothing else useful to do.",
-    "</task_result>",
-    "</task>",
-  ].join("\n")
-}
-
-function backgroundMessage(input: {
+export function renderTaskOutput(input: {
   sessionID: SessionID
-  description: string
-  state: "completed" | "error"
+  state: "running" | "completed" | "error"
+  summary?: string
   text: string
 }) {
-  const tag = input.state === "completed" ? "task_result" : "task_error"
-  const title =
-    input.state === "completed"
-      ? `Background task completed: ${input.description}`
-      : `Background task failed: ${input.description}`
+  const tag = input.state === "error" ? "task_error" : "task_result"
   return [
     `<task id="${input.sessionID}" state="${input.state}">`,
-    `<summary>${title}</summary>`,
+    ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
     `<${tag}>`,
     input.text,
     `</${tag}>`,
@@ -88,10 +88,39 @@ function backgroundMessage(input: {
   ].join("\n")
 }
 
-function errorText(error: unknown) {
-  if (error instanceof Error) return error.message
-  return String(error)
+function normalizeSubagentType(input: string) {
+  if (input === "general-purpose") return "general"
+  return input
 }
+
+function formatSubagentPrompt(input: { prompt: string; taskID: SessionID; resumed: boolean }) {
+  return [
+    SUBAGENT_HANDOFF,
+    `Task session: ${input.taskID}${input.resumed ? " (resumed)" : ""}`,
+    "User task:",
+    input.prompt,
+  ].join("\n\n")
+}
+
+const requireResumableTaskSession = Effect.fn("TaskTool.requireResumableTaskSession")(function* (input: {
+  taskID: string
+  parentID: SessionID
+  subagent: string
+  sessions: Session.Interface
+}) {
+  const session = yield* input.sessions
+    .get(SessionID.make(input.taskID))
+    .pipe(Effect.catchCause(() => Effect.fail(new Error(`Cannot resume unknown task_id: ${input.taskID}`))))
+  if (session.parentID !== input.parentID) {
+    return yield* Effect.fail(new Error(`Cannot resume task_id ${input.taskID}: it is not a child of this session`))
+  }
+  if (session.agent && session.agent !== input.subagent) {
+    return yield* Effect.fail(
+      new Error(`Cannot resume task_id ${input.taskID}: expected ${session.agent}, got ${input.subagent}`),
+    )
+  }
+  return session
+})
 
 export const TaskTool = Tool.define(
   id,
@@ -102,6 +131,7 @@ export const TaskTool = Tool.define(
     const sessions = yield* Session.Service
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
+    const database = yield* Database.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -109,57 +139,100 @@ export const TaskTool = Tool.define(
     ) {
       const cfg = yield* config.get()
       const runInBackground = params.background === true
+      const subagent = normalizeSubagentType(params.subagent_type)
       if (runInBackground && !flags.experimentalBackgroundSubagents) {
         return yield* Effect.fail(
           new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true"),
         )
       }
 
+      const parent = yield* sessions.get(ctx.sessionID)
+      let current = parent
+      let depth = 0
+      while (current.parentID) {
+        depth++
+        current = yield* sessions.get(current.parentID)
+      }
+      if (depth >= (cfg.subagent_depth ?? 1)) {
+        return yield* Effect.fail(
+          new Error(
+            `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
+          ),
+        )
+      }
+
       if (!ctx.extra?.bypassAgentCheck) {
         yield* ctx.ask({
           permission: id,
-          patterns: [params.subagent_type],
+          patterns: [subagent],
           always: ["*"],
           metadata: {
             description: params.description,
-            subagent_type: params.subagent_type,
+            subagent_type: subagent,
           },
         })
       }
 
-      const next = yield* agent.get(params.subagent_type)
+      const next = yield* agent.get(subagent)
       if (!next) {
         return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
       }
 
       const session = params.task_id
-        ? yield* sessions.get(SessionID.make(params.task_id)).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
+        ? yield* requireResumableTaskSession({
+            taskID: params.task_id,
+            parentID: ctx.sessionID,
+            subagent: next.name,
+            sessions,
+          })
         : undefined
-      const parent = yield* sessions.get(ctx.sessionID)
-      const parentAgent = parent.agent
-        ? yield* agent.get(parent.agent).pipe(Effect.catchCause(() => Effect.succeed(undefined)))
-        : undefined
+      const siblingTaskRunning =
+        !session &&
+        (yield* background.list()).some(
+          (job) => job.type === id && job.status === "running" && job.metadata?.parentSessionId === ctx.sessionID,
+        )
+      const childPermission = deriveSubagentSessionPermission({
+        parentSessionPermission: parent.permission ?? [],
+        subagent: next,
+      })
+      const childToolDenies = [
+        ...(siblingTaskRunning ? SIBLING_TASK_MUTATION_DENIES : []),
+        ...(next.permission.some((rule) => rule.permission === "todowrite")
+          ? []
+          : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
+        ...(next.permission.some((rule) => rule.permission === id)
+          ? []
+          : [{ permission: id, pattern: "*" as const, action: "deny" as const }]),
+        ...(cfg.experimental?.primary_tools?.map((permission) => ({
+          permission,
+          pattern: "*" as const,
+          action: "deny" as const,
+        })) ?? []),
+      ]
       const nextSession =
         session ??
         (yield* sessions.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
+          agent: next.name,
           permission: [
-            ...deriveSubagentSessionPermission({
-              parentSessionPermission: parent.permission ?? [],
-              parentAgent,
-              subagent: next,
-            }),
-            ...(cfg.experimental?.primary_tools?.map((item) => ({
-              pattern: "*",
-              action: "allow" as const,
-              permission: item,
-            })) ?? []),
+            ...childPermission,
+            ...childToolDenies.filter(
+              (deny) =>
+                !childPermission.some(
+                  (rule) =>
+                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+                ),
+            ),
           ],
         }))
 
-      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(Effect.orDie)
+      const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+        Effect.provideService(Database.Service, database),
+        Effect.orDie,
+      )
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+      const variant = msg.info.variant
 
       const model = next.model ?? {
         modelID: msg.info.modelID,
@@ -169,6 +242,7 @@ export const TaskTool = Tool.define(
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        ...(session ? { resumed: true } : {}),
         ...(runInBackground ? { background: true } : {}),
       }
 
@@ -181,7 +255,13 @@ export const TaskTool = Tool.define(
       if (!ops) return yield* Effect.fail(new Error("TaskTool requires promptOps in ctx.extra"))
 
       const runTask = Effect.fn("TaskTool.runTask")(function* () {
-        const parts = yield* ops.resolvePromptParts(params.prompt)
+        const parts = yield* ops.resolvePromptParts(
+          formatSubagentPrompt({
+            prompt: params.prompt,
+            taskID: nextSession.id,
+            resumed: !!session,
+          }),
+        )
         const result = yield* ops.prompt({
           messageID: MessageID.ascending(),
           sessionID: nextSession.id,
@@ -189,12 +269,8 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
+          variant: next.model ? undefined : variant,
           agent: next.name,
-          tools: {
-            ...(next.permission.some((rule) => rule.permission === "todowrite") ? {} : { todowrite: false }),
-            ...(next.permission.some((rule) => rule.permission === id) ? {} : { task: false }),
-            ...Object.fromEntries((cfg.experimental?.primary_tools ?? []).map((item) => [item, false])),
-          },
           parts,
         })
         return result.parts.findLast((item) => item.type === "text")?.text ?? ""
@@ -209,14 +285,18 @@ export const TaskTool = Tool.define(
           .prompt({
             sessionID: ctx.sessionID,
             agent: currentParent.agent ?? ctx.agent,
+            variant,
             parts: [
               {
                 type: "text",
                 synthetic: true,
-                text: backgroundMessage({
+                text: renderTaskOutput({
                   sessionID: nextSession.id,
-                  description: params.description,
                   state,
+                  summary:
+                    state === "completed"
+                      ? `Background task completed: ${params.description}`
+                      : `Background task failed: ${params.description}`,
                   text,
                 }),
               },
@@ -225,36 +305,70 @@ export const TaskTool = Tool.define(
           .pipe(Effect.ignore, Effect.forkIn(scope, { startImmediately: true }))
       })
 
-      const existing = yield* background.get(nextSession.id)
-      if (existing?.status === "running") {
-        return yield* Effect.fail(new Error(`Task ${nextSession.id} is already running.`))
-      }
+      const notify = Effect.fn("TaskTool.notifyBackgroundResult")(function* (jobID: string) {
+        yield* background.wait({ id: jobID }).pipe(
+          Effect.flatMap((result) => {
+            if (result.info?.status === "completed") return inject("completed", result.info.output ?? "")
+            if (result.info?.status === "error") return inject("error", result.info.error ?? "")
+            return Effect.void
+          }),
+          Effect.forkIn(scope, { startImmediately: true }),
+        )
+      })
 
-      if (runInBackground) {
-        const info = yield* background.start({
-          id: nextSession.id,
-          type: id,
-          title: params.description,
-          metadata,
-          run: runTask().pipe(
-            Effect.tap((text) => inject("completed", text).pipe(Effect.ignore)),
-            Effect.catchCause((cause) =>
-              (Cause.hasInterruptsOnly(cause)
-                ? Effect.void
-                : inject("error", errorText(Cause.squash(cause))).pipe(Effect.ignore)
-              ).pipe(Effect.andThen(Effect.failCause(cause))),
-            ),
-          ),
-        })
-
+      if (yield* background.extend({ id: nextSession.id, run: runTask() })) {
+        yield* background.promote(nextSession.id)
         return {
           title: params.description,
           metadata: {
             ...metadata,
+            background: true,
+            jobId: nextSession.id,
+          },
+          output: renderTaskOutput({
+            sessionID: nextSession.id,
+            state: "running",
+            summary: "Background task updated",
+            text: BACKGROUND_UPDATED,
+          }),
+        }
+      }
+
+      const info = yield* background.start({
+        id: nextSession.id,
+        type: id,
+        title: params.description,
+        metadata,
+        onPromote: Effect.all([
+          ctx.metadata({
+            title: params.description,
+            metadata: { ...metadata, background: true, jobId: nextSession.id },
+          }),
+          notify(nextSession.id),
+        ]),
+        run: runTask().pipe(Effect.onInterrupt(() => ops.cancel(nextSession.id))),
+      })
+
+      function backgroundResult() {
+        return {
+          title: params.description,
+          metadata: {
+            ...metadata,
+            background: true,
             jobId: info.id,
           },
-          output: backgroundOutput(nextSession.id),
+          output: renderTaskOutput({
+            sessionID: nextSession.id,
+            state: "running",
+            summary: "Background task started",
+            text: BACKGROUND_STARTED,
+          }),
         }
+      }
+
+      if (runInBackground) {
+        yield* notify(info.id)
+        return backgroundResult()
       }
 
       const runCancel = yield* EffectBridge.make()
@@ -270,16 +384,23 @@ export const TaskTool = Tool.define(
         }),
         () =>
           Effect.gen(function* () {
-            const text = yield* runTask()
+            const result = yield* Effect.raceFirst(
+              background.wait({ id: nextSession.id }).pipe(Effect.map((waited) => waited.info)),
+              background.waitForPromotion(nextSession.id),
+            )
+            if (result?.metadata?.background === true) return backgroundResult()
+            if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
+            if (result?.status === "cancelled") return yield* Effect.fail(new Error("Task cancelled"))
             return {
               title: params.description,
               metadata,
-              output: output(nextSession.id, text),
+              output: renderTaskOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
             }
           }),
         (_, exit) =>
           Effect.gen(function* () {
-            if (Exit.hasInterrupts(exit)) yield* cancel
+            if (Exit.hasInterrupts(exit))
+              yield* Effect.all([cancel, background.cancel(nextSession.id)], { discard: true })
           }).pipe(
             Effect.ensuring(
               Effect.sync(() => {
@@ -291,7 +412,9 @@ export const TaskTool = Tool.define(
     })
 
     return {
-      description: flags.experimentalBackgroundSubagents ? DESCRIPTION + BACKGROUND_DESCRIPTION : DESCRIPTION,
+      description: flags.experimentalBackgroundSubagents
+        ? [DESCRIPTION, BACKGROUND_DESCRIPTION].join("\n\n")
+        : DESCRIPTION,
       parameters: Parameters,
       jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
       execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
