@@ -65,6 +65,7 @@ const recentTaskSessions = (messages: SessionV1.WithParts[]) => {
 
   if (tasks.length === 0) return
   return [
+    "When continuing earlier subagent work, prefer Task(task_id=..., prompt=...) over spawning a fresh session. You may omit subagent_type when resuming.",
     "Recent task sessions available for task_id follow-ups:",
     ...tasks.map(
       (task) =>

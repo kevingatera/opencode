@@ -63,7 +63,7 @@ function recoveredTaskOutput(part: ToolPart, message: Assistant) {
     part.state.status === "completed" &&
     (part.state.metadata?.recovered === true ||
       part.state.output.includes("<summary>Recovered task completed:") ||
-      (!message.finish && part.state.output.startsWith("<task id=")))
+      (!message.finish && part.state.output.includes("<task id=")))
   )
     return part.state.output
   if (part.state.status === "error" && part.state.metadata?.recovered === true) return part.state.error

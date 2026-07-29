@@ -318,18 +318,17 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
       "type": "string",
     },
     "subagent_type": {
-      "description": "The type of specialized agent to use for this task",
+      "description": "The type of specialized agent to use when spawning a new task. Required for new tasks. When resuming via task_id, omit this — the resumed session keeps its own type, and a conflicting type is rejected.",
       "type": "string",
     },
     "task_id": {
-      "description": "This should only be set if you mean to resume a previous task (you can pass a prior task_id and the task will continue the same subagent session as before instead of creating a fresh one)",
+      "description": "Optional prior task_id (the id from a previous Task result) to continue the same subagent session instead of creating a fresh one. Prefer this for follow-ups like continue, also check this, or tell that agent to do X, whether the subagent is running or stopped. When set, do not also pass a conflicting subagent_type.",
       "type": "string",
     },
   },
   "required": [
     "description",
     "prompt",
-    "subagent_type",
   ],
   "type": "object",
 }

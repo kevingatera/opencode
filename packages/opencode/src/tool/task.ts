@@ -53,10 +53,13 @@ const SUBAGENT_HANDOFF = [
 const BaseParameterFields = {
   description: Schema.String.annotate({ description: "A short (3-5 words) description of the task" }),
   prompt: Schema.String.annotate({ description: "The task for the agent to perform" }),
-  subagent_type: Schema.String.annotate({ description: "The type of specialized agent to use for this task" }),
+  subagent_type: Schema.optional(Schema.String).annotate({
+    description:
+      "The type of specialized agent to use when spawning a new task. Required for new tasks. When resuming via task_id, omit this — the resumed session keeps its own type, and a conflicting type is rejected.",
+  }),
   task_id: Schema.optional(Schema.String).annotate({
     description:
-      "Set this to a prior task_id to relay follow-up instructions to the same subagent session instead of creating a fresh one. Use it for commands like continue, also check this, or tell that agent to do X, whether the subagent is running in the background or stopped.",
+      "Optional prior task_id (the id from a previous Task result) to continue the same subagent session instead of creating a fresh one. Prefer this for follow-ups like continue, also check this, or tell that agent to do X, whether the subagent is running or stopped. When set, do not also pass a conflicting subagent_type.",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
 }
@@ -76,9 +79,20 @@ export function renderTaskOutput(input: {
   state: "running" | "completed" | "error"
   summary?: string
   text: string
+  resumed?: boolean
+  subagentType?: string
 }) {
   const tag = input.state === "error" ? "task_error" : "task_result"
+  const header = [
+    `task_id: ${input.sessionID}`,
+    `status: ${input.state}`,
+    ...(input.subagentType ? [`actual_subagent_type: ${input.subagentType}`] : []),
+    ...(input.resumed ? ["resumed: true"] : []),
+    `resume_hint: To continue this same subagent later, call Task(task_id="${input.sessionID}", prompt="..."). Prefer task_id over spawning a fresh session; omit subagent_type when resuming so the session keeps its type.`,
+  ]
   return [
+    ...header,
+    "",
     `<task id="${input.sessionID}" state="${input.state}">`,
     ...(input.summary ? [`<summary>${input.summary}</summary>`] : []),
     `<${tag}>`,
@@ -105,7 +119,6 @@ function formatSubagentPrompt(input: { prompt: string; taskID: SessionID; resume
 const requireResumableTaskSession = Effect.fn("TaskTool.requireResumableTaskSession")(function* (input: {
   taskID: string
   parentID: SessionID
-  subagent: string
   sessions: Session.Interface
 }) {
   const session = yield* input.sessions
@@ -114,12 +127,27 @@ const requireResumableTaskSession = Effect.fn("TaskTool.requireResumableTaskSess
   if (session.parentID !== input.parentID) {
     return yield* Effect.fail(new Error(`Cannot resume task_id ${input.taskID}: it is not a child of this session`))
   }
-  if (session.agent && session.agent !== input.subagent) {
-    return yield* Effect.fail(
-      new Error(`Cannot resume task_id ${input.taskID}: expected ${session.agent}, got ${input.subagent}`),
-    )
-  }
   return session
+})
+
+type TaskMetadata = {
+  parentSessionId: SessionID
+  sessionId: SessionID
+  model: { modelID: string; providerID: string }
+  resumed?: boolean
+  background?: boolean
+  jobId?: string
+}
+
+const resolveResumedSubagentType = Effect.fn("TaskTool.resolveResumedSubagentType")(function* (input: {
+  agent: Agent.Interface
+  storedType?: string
+}) {
+  if (!input.storedType) return undefined
+  const storedAgent = yield* input.agent.get(input.storedType)
+  // Older child sessions sometimes stored the parent primary agent name; treat those as unset.
+  if (!storedAgent || storedAgent.mode === "primary") return undefined
+  return input.storedType
 })
 
 export const TaskTool = Tool.define(
@@ -139,7 +167,10 @@ export const TaskTool = Tool.define(
     ) {
       const cfg = yield* config.get()
       const runInBackground = params.background === true
-      const subagent = normalizeSubagentType(params.subagent_type)
+      const taskID = params.task_id?.trim()
+      const requestedType = params.subagent_type?.trim()
+        ? normalizeSubagentType(params.subagent_type.trim())
+        : undefined
       if (runInBackground && !flags.experimentalBackgroundSubagents) {
         return yield* Effect.fail(
           new Error("Background subagents require OPENCODE_EXPERIMENTAL_BACKGROUND_SUBAGENTS=true"),
@@ -153,10 +184,38 @@ export const TaskTool = Tool.define(
         depth++
         current = yield* sessions.get(current.parentID)
       }
-      if (depth >= (cfg.subagent_depth ?? 1)) {
+      const subagentDepth = cfg.subagent_depth ?? 1
+      if (depth >= subagentDepth) {
+        return yield* Effect.fail(
+          new Error(`Subagent depth limit reached (${subagentDepth}). Increase "subagent_depth" to allow nested subagents.`),
+        )
+      }
+
+      const session = taskID
+        ? yield* requireResumableTaskSession({
+            taskID,
+            parentID: ctx.sessionID,
+            sessions,
+          })
+        : undefined
+      const resumedType = yield* resolveResumedSubagentType({
+        agent,
+        storedType: session?.agent ? normalizeSubagentType(session.agent) : undefined,
+      })
+      if (requestedType && resumedType && requestedType !== resumedType) {
         return yield* Effect.fail(
           new Error(
-            `Subagent depth limit reached (${cfg.subagent_depth ?? 1}). Increase "subagent_depth" to allow nested subagents.`,
+            `Cannot set subagent_type when resuming an existing task. Resume by task_id only (session is ${resumedType}, got ${requestedType}).`,
+          ),
+        )
+      }
+      const subagent = resumedType ?? requestedType
+      if (!subagent) {
+        return yield* Effect.fail(
+          new Error(
+            taskID
+              ? `Cannot resume task_id ${taskID}: session has no agent; pass subagent_type`
+              : "Provide subagent_type to spawn a new subagent, or task_id to resume an existing one.",
           ),
         )
       }
@@ -175,17 +234,11 @@ export const TaskTool = Tool.define(
 
       const next = yield* agent.get(subagent)
       if (!next) {
-        return yield* Effect.fail(new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`))
+        return yield* Effect.fail(
+          new Error(`Unknown agent type: ${params.subagent_type ?? subagent} is not a valid agent type`),
+        )
       }
 
-      const session = params.task_id
-        ? yield* requireResumableTaskSession({
-            taskID: params.task_id,
-            parentID: ctx.sessionID,
-            subagent: next.name,
-            sessions,
-          })
-        : undefined
       const siblingTaskRunning =
         !session &&
         (yield* background.list()).some(
@@ -238,13 +291,27 @@ export const TaskTool = Tool.define(
         modelID: msg.info.modelID,
         providerID: msg.info.providerID,
       }
-      const metadata = {
+      const resumed = !!session
+      const metadata: TaskMetadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
-        ...(session ? { resumed: true } : {}),
+        ...(resumed ? { resumed: true } : {}),
         ...(runInBackground ? { background: true } : {}),
       }
+      const taskOutput = (args: {
+        state: "running" | "completed" | "error"
+        summary?: string
+        text: string
+      }) =>
+        renderTaskOutput({
+          sessionID: nextSession.id,
+          state: args.state,
+          summary: args.summary,
+          text: args.text,
+          resumed,
+          subagentType: next.name,
+        })
 
       yield* ctx.metadata({
         title: params.description,
@@ -259,7 +326,7 @@ export const TaskTool = Tool.define(
           formatSubagentPrompt({
             prompt: params.prompt,
             taskID: nextSession.id,
-            resumed: !!session,
+            resumed,
           }),
         )
         const result = yield* ops.prompt({
@@ -301,8 +368,7 @@ export const TaskTool = Tool.define(
               {
                 type: "text",
                 synthetic: true,
-                text: renderTaskOutput({
-                  sessionID: nextSession.id,
+                text: taskOutput({
                   state,
                   summary:
                     state === "completed"
@@ -336,8 +402,7 @@ export const TaskTool = Tool.define(
             background: true,
             jobId: nextSession.id,
           },
-          output: renderTaskOutput({
-            sessionID: nextSession.id,
+          output: taskOutput({
             state: "running",
             summary: "Background task updated",
             text: BACKGROUND_UPDATED,
@@ -368,8 +433,7 @@ export const TaskTool = Tool.define(
             background: true,
             jobId: info.id,
           },
-          output: renderTaskOutput({
-            sessionID: nextSession.id,
+          output: taskOutput({
             state: "running",
             summary: "Background task started",
             text: BACKGROUND_STARTED,
@@ -395,9 +459,9 @@ export const TaskTool = Tool.define(
         }),
         () =>
           Effect.gen(function* () {
-            const result = yield* Effect.raceFirst(
-              background.wait({ id: nextSession.id }).pipe(Effect.map((waited) => waited.info)),
-              background.waitForPromotion(nextSession.id),
+            const result = yield* background.wait({ id: nextSession.id }).pipe(
+              Effect.map((waited) => waited.info),
+              Effect.raceFirst(background.waitForPromotion(nextSession.id)),
             )
             if (result?.metadata?.background === true) return backgroundResult()
             if (result?.status === "error") return yield* Effect.fail(new Error(result.error ?? "Task failed"))
@@ -405,7 +469,7 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata,
-              output: renderTaskOutput({ sessionID: nextSession.id, state: "completed", text: result?.output ?? "" }),
+              output: taskOutput({ state: "completed", text: result?.output ?? "" }),
             }
           }),
         (_, exit) =>
@@ -428,7 +492,7 @@ export const TaskTool = Tool.define(
         : DESCRIPTION,
       parameters: Parameters,
       jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context) =>
+      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context): Effect.Effect<Tool.ExecuteResult<TaskMetadata>> =>
         run(params, ctx).pipe(Effect.orDie),
     }
   }),
