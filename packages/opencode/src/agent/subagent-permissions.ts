@@ -13,6 +13,7 @@ import type { Agent } from "./agent"
  */
 export function deriveSubagentSessionPermission(input: {
   parentSessionPermission: PermissionV1.Ruleset
+  parentAgent?: Agent.Info
   subagent: Agent.Info
 }): PermissionV1.Ruleset {
   const canTask = input.subagent.permission.some((rule) => rule.permission === "task")

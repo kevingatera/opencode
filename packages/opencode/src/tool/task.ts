@@ -3,6 +3,7 @@ import DESCRIPTION from "./task.txt"
 import { ToolJsonSchema } from "./json-schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { BackgroundJob } from "@/background/job"
+import { Service } from "@opencode-ai/core/background-job"
 import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
@@ -107,6 +108,10 @@ function normalizeSubagentType(input: string) {
   return input
 }
 
+function subagentDepthLimit(cfg: { subagent_depth?: number }) {
+  return cfg.subagent_depth ?? 1
+}
+
 function formatSubagentPrompt(input: { prompt: string; taskID: SessionID; resumed: boolean }) {
   return [
     SUBAGENT_HANDOFF,
@@ -154,7 +159,9 @@ export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
     const agent = yield* Agent.Service
-    const background = yield* BackgroundJob.Service
+    // Prefer the core Service tag so execute typing sees the full job interface
+    // (the `@/background/job` namespace re-export can truncate it in the IDE).
+    const background = yield* Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
     const scope = yield* Scope.Scope
@@ -184,10 +191,12 @@ export const TaskTool = Tool.define(
         depth++
         current = yield* sessions.get(current.parentID)
       }
-      const subagentDepth = cfg.subagent_depth ?? 1
+      const subagentDepth = subagentDepthLimit(cfg)
       if (depth >= subagentDepth) {
         return yield* Effect.fail(
-          new Error(`Subagent depth limit reached (${subagentDepth}). Increase "subagent_depth" to allow nested subagents.`),
+          new Error(
+            `Subagent depth limit reached (${subagentDepth}). Increase "subagent_depth" to allow nested subagents.`,
+          ),
         )
       }
 
@@ -244,8 +253,10 @@ export const TaskTool = Tool.define(
         (yield* background.list()).some(
           (job) => job.type === id && job.status === "running" && job.metadata?.parentSessionId === ctx.sessionID,
         )
+      const parentAgent = parent.agent ? yield* agent.get(parent.agent) : undefined
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
+        parentAgent,
         subagent: next,
       })
       const childToolDenies = [
@@ -287,9 +298,9 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = next.model ?? {
-        modelID: msg.info.modelID,
-        providerID: msg.info.providerID,
+      const model = {
+        modelID: next.model?.modelID ?? msg.info.modelID,
+        providerID: next.model?.providerID ?? msg.info.providerID,
       }
       const resumed = !!session
       const metadata: TaskMetadata = {
@@ -492,8 +503,13 @@ export const TaskTool = Tool.define(
         : DESCRIPTION,
       parameters: Parameters,
       jsonSchema: flags.experimentalBackgroundSubagents ? undefined : ToolJsonSchema.fromSchema(BaseParameters),
-      execute: (params: Schema.Schema.Type<typeof Parameters>, ctx: Tool.Context): Effect.Effect<Tool.ExecuteResult<TaskMetadata>> =>
-        run(params, ctx).pipe(Effect.orDie),
+      execute: (
+        params: Schema.Schema.Type<typeof Parameters>,
+        ctx: Tool.Context,
+      ): Effect.Effect<Tool.ExecuteResult<TaskMetadata>> =>
+        // Effect.fn inference can widen R to unknown across the large execute body;
+        // Tool.Def requires R = never and services are already closed over from init.
+        run(params, ctx).pipe(Effect.orDie) as Effect.Effect<Tool.ExecuteResult<TaskMetadata>>,
     }
   }),
 )
