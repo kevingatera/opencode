@@ -2,7 +2,6 @@ import * as Tool from "./tool"
 import DESCRIPTION from "./task.txt"
 import { ToolJsonSchema } from "./json-schema"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
-import { BackgroundJob } from "@/background/job"
 import { Service } from "@opencode-ai/core/background-job"
 import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
@@ -108,8 +107,9 @@ function normalizeSubagentType(input: string) {
   return input
 }
 
-function subagentDepthLimit(cfg: { subagent_depth?: number }) {
-  return cfg.subagent_depth ?? 1
+function subagentDepthLimit(cfg: unknown) {
+  if (!cfg || typeof cfg !== "object" || !("subagent_depth" in cfg)) return 1
+  return typeof cfg.subagent_depth === "number" ? cfg.subagent_depth : 1
 }
 
 function formatSubagentPrompt(input: { prompt: string; taskID: SessionID; resumed: boolean }) {
@@ -159,8 +159,6 @@ export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
     const agent = yield* Agent.Service
-    // Prefer the core Service tag so execute typing sees the full job interface
-    // (the `@/background/job` namespace re-export can truncate it in the IDE).
     const background = yield* Service
     const config = yield* Config.Service
     const sessions = yield* Session.Service
