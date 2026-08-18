@@ -49,11 +49,20 @@ import { SessionMessage } from "@opencode-ai/schema/session-message"
 
 const parentTitlePrefix = "New session - "
 const childTitlePrefix = "Child session - "
+export const TITLE_SOURCE_AUTO = "auto"
+export const TITLE_SOURCE_USER = "user"
 
 export function isDefaultTitle(title: string) {
   return new RegExp(
-    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$`,
+    `^(${parentTitlePrefix}|${childTitlePrefix})\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z(?: \\(fork #\\d+\\))?$`,
   ).test(title)
+}
+
+export function isAutoManagedTitle(session: { title: string; metadata?: Record<string, unknown> }) {
+  const source = session.metadata?.titleSource
+  if (source === TITLE_SOURCE_USER) return false
+  if (source === TITLE_SOURCE_AUTO) return true
+  return isDefaultTitle(session.title)
 }
 
 type SessionRow = typeof SessionTable.$inferSelect
@@ -432,7 +441,11 @@ export interface Interface {
   readonly fork: (input: { sessionID: SessionID; messageID?: MessageID }) => Effect.Effect<Info, NotFound>
   readonly touch: (sessionID: SessionID) => Effect.Effect<void>
   readonly get: (id: SessionID) => Effect.Effect<Info, NotFound>
-  readonly setTitle: (input: { sessionID: SessionID; title: string }) => Effect.Effect<void>
+  readonly setTitle: (input: {
+    sessionID: SessionID
+    title: string
+    source?: "auto" | "user"
+  }) => Effect.Effect<void>
   readonly setArchived: (input: { sessionID: SessionID; time?: number }) => Effect.Effect<void>
   readonly setMetadata: (input: typeof SetMetadataInput.Type) => Effect.Effect<void>
   readonly setAgentModel: (input: {
@@ -516,6 +529,11 @@ const layer: Layer.Layer<
       permission?: PermissionV1.Ruleset
     }) {
       const ctx = yield* InstanceState.context
+      const title = input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString()
+      const lock =
+        input.title && !input.metadata?.titleSource && !isDefaultTitle(input.title)
+          ? { titleSource: TITLE_SOURCE_USER }
+          : undefined
       const result: Info = {
         id: SessionID.descending(input.id),
         slug: Slug.create(),
@@ -525,10 +543,10 @@ const layer: Layer.Layer<
         path: input.path,
         workspaceID: input.workspaceID,
         parentID: input.parentID,
-        title: input.title ?? (input.parentID ? childTitlePrefix : parentTitlePrefix) + new Date().toISOString(),
+        title,
         agent: input.agent,
         model: input.model,
-        metadata: input.metadata,
+        metadata: lock || input.metadata ? { ...input.metadata, ...lock } : input.metadata,
         permission: input.permission ? [...input.permission] : undefined,
         cost: 0,
         tokens: EmptyTokens,
@@ -760,8 +778,21 @@ const layer: Layer.Layer<
       yield* patch(sessionID, { time: { updated: Date.now() } }).pipe(Effect.orDie)
     })
 
-    const setTitle = Effect.fn("Session.setTitle")(function* (input: { sessionID: SessionID; title: string }) {
-      yield* patch(input.sessionID, { title: input.title }).pipe(Effect.orDie)
+    const setTitle = Effect.fn("Session.setTitle")(function* (input: {
+      sessionID: SessionID
+      title: string
+      source?: "auto" | "user"
+    }) {
+      if (!input.source) {
+        yield* patch(input.sessionID, { title: input.title }).pipe(Effect.orDie)
+        return
+      }
+      const current = yield* get(input.sessionID).pipe(Effect.orDie)
+      if (input.source === "auto" && !isAutoManagedTitle(current)) return
+      yield* patch(input.sessionID, {
+        title: input.title,
+        metadata: { ...current.metadata, titleSource: input.source },
+      }).pipe(Effect.orDie)
     })
 
     const setArchived = Effect.fn("Session.setArchived")(function* (input: { sessionID: SessionID; time?: number }) {

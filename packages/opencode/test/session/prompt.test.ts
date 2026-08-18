@@ -2802,3 +2802,68 @@ noLLMServer.instance(
     }),
   30_000,
 )
+
+it.instance("refreshes auto titles after later turns and skips user titles", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig(providerCfg)
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    })
+    expect(Session.isDefaultTitle(chat.title)).toBe(true)
+
+    const titleHits = (hits: { body: Record<string, unknown> }[]) =>
+      hits.filter((hit) => JSON.stringify(hit.body).includes("Generate a title for this conversation"))
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "debug 429 errors" }],
+    })
+    yield* llm.text("looking at 429s")
+    yield* prompt.loop({ sessionID: chat.id })
+    const first = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const info = yield* sessions.get(chat.id)
+        return info.title === "E2E Title" ? info : undefined
+      }),
+      "timed out waiting for first generated title",
+    )
+    expect(first.metadata?.titleSource).toBe("auto")
+    const afterFirst = titleHits(yield* llm.hits).length
+    expect(afterFirst).toBeGreaterThanOrEqual(1)
+
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "now also check Imperva IP blocks" }],
+    })
+    yield* llm.text("checking Imperva")
+    yield* prompt.loop({ sessionID: chat.id })
+    const afterSecond = yield* pollWithTimeout(
+      Effect.gen(function* () {
+        const titles = titleHits(yield* llm.hits)
+        return titles.length > afterFirst ? titles : undefined
+      }),
+      "timed out waiting for title refresh",
+    )
+    expect(afterSecond.length).toBeGreaterThan(afterFirst)
+
+    yield* sessions.setTitle({ sessionID: chat.id, title: "Manual title", source: "user" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      noReply: true,
+      parts: [{ type: "text", text: "ignore this" }],
+    })
+    yield* llm.text("ok")
+    yield* prompt.loop({ sessionID: chat.id })
+    yield* Effect.sleep("200 millis")
+    const locked = yield* sessions.get(chat.id)
+    expect(locked.title).toBe("Manual title")
+    expect(titleHits(yield* llm.hits).length).toBe(afterSecond.length)
+  }),
+)

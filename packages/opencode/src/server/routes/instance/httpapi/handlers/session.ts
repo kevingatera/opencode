@@ -248,7 +248,7 @@ export const sessionHandlers = HttpApiBuilder.group(InstanceHttpApi, "session", 
     }) {
       const current = yield* requireSession(ctx.params.sessionID)
       if (ctx.payload.title !== undefined) {
-        yield* session.setTitle({ sessionID: ctx.params.sessionID, title: ctx.payload.title })
+        yield* session.setTitle({ sessionID: ctx.params.sessionID, title: ctx.payload.title, source: "user" })
       }
       if (ctx.payload.metadata !== undefined) {
         yield* session.setMetadata({ sessionID: ctx.params.sessionID, metadata: ctx.payload.metadata })

@@ -44,6 +44,34 @@ const awaitDeferred = <T>(deferred: Deferred.Deferred<T>, message: string) =>
 
 const remove = (id: SessionID) => SessionNs.use.remove(id)
 
+describe("session title ownership", () => {
+  it.instance("locks explicit create titles and treats default stamps as auto", () =>
+    Effect.gen(function* () {
+      const session = yield* SessionNs.Service
+      const named = yield* session.create({ title: "Pinned" })
+      const fresh = yield* session.create({})
+      expect(SessionNs.isAutoManagedTitle(named)).toBe(false)
+      expect(SessionNs.isDefaultTitle(fresh.title)).toBe(true)
+      expect(SessionNs.isAutoManagedTitle(fresh)).toBe(true)
+      expect(SessionNs.isDefaultTitle("New session - 2026-08-11T16:36:10.601Z (fork #1)")).toBe(true)
+
+      yield* session.setTitle({ sessionID: fresh.id, title: "429 investigation", source: "auto" })
+      const auto = yield* session.get(fresh.id)
+      expect(auto.title).toBe("429 investigation")
+      expect(SessionNs.isAutoManagedTitle(auto)).toBe(true)
+
+      yield* session.setTitle({ sessionID: fresh.id, title: "My name", source: "user" })
+      yield* session.setTitle({ sessionID: fresh.id, title: "should not stick", source: "auto" })
+      const locked = yield* session.get(fresh.id)
+      expect(locked.title).toBe("My name")
+      expect(SessionNs.isAutoManagedTitle(locked)).toBe(false)
+
+      yield* session.remove(named.id)
+      yield* session.remove(fresh.id)
+    }),
+  )
+})
+
 describe("session.created event", () => {
   it.instance("should emit session.created event when session is created", () =>
     Effect.gen(function* () {
@@ -232,8 +260,8 @@ describe("Session", () => {
         session.remove(info.id).pipe(Effect.ignore),
       )
 
-      expect(saved.metadata).toEqual(meta)
-      expect(fork.metadata).toEqual(meta)
+      expect(saved.metadata).toEqual({ ...meta, titleSource: "user" })
+      expect(fork.metadata).toEqual({ ...meta, titleSource: "user" })
       expect(fork.metadata).not.toBe(meta)
     }),
   )
@@ -326,7 +354,7 @@ describe("Session", () => {
   it.instance("omits metadata when not provided", () =>
     Effect.gen(function* () {
       const session = yield* SessionNs.Service
-      const created = yield* Effect.acquireRelease(session.create({ title: "empty-meta" }), (info) =>
+      const created = yield* Effect.acquireRelease(session.create({}), (info) =>
         session.remove(info.id).pipe(Effect.ignore),
       )
       const saved = yield* session.get(created.id)
