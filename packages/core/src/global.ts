@@ -1,5 +1,6 @@
 import path from "path"
 import fs from "fs/promises"
+import { realpathSync } from "fs"
 import { xdgData, xdgCache, xdgConfig, xdgState } from "xdg-basedir"
 import os from "os"
 import { Context, Effect, Layer } from "effect"
@@ -29,6 +30,22 @@ const paths = {
 }
 
 export const Path = paths
+
+/** Permission globs for host temp dirs, including macOS /tmp vs $TMPDIR. */
+export function tempGlobs() {
+  const tmpdir = os.tmpdir()
+  const globs = [path.join(tmpdir, "*"), path.join(tmp, "*")]
+  if (process.platform !== "win32") globs.push("/tmp/*", "/private/tmp/*")
+  try {
+    const real = realpathSync(tmpdir)
+    if (real !== tmpdir) {
+      globs.push(path.join(real, "*"), path.join(real, app, "*"))
+    }
+  } catch {
+    // ignore
+  }
+  return [...new Set(globs)]
+}
 
 Flock.setGlobal({ state })
 

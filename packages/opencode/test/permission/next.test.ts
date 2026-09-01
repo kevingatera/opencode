@@ -5,6 +5,8 @@ import { Cause, Deferred, Effect, Exit, Fiber, Layer } from "effect"
 import { EventV2Bridge } from "../../src/event-v2-bridge"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Permission } from "../../src/permission"
+import { PermissionSaved } from "@opencode-ai/core/permission/saved"
+import { InstanceState } from "../../src/effect/instance-state"
 import { InstanceBootstrap } from "../../src/project/bootstrap"
 import { InstanceStore } from "../../src/project/instance-store"
 import { TestInstance, tmpdirScoped } from "../fixture/fixture"
@@ -15,7 +17,13 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 
 const noopBootstrap = Layer.succeed(InstanceBootstrap.Service, InstanceBootstrap.Service.of({ run: Effect.void }))
 const env = AppNodeBuilder.build(
-  LayerNode.group([Permission.node, EventV2Bridge.node, CrossSpawnSpawner.node, InstanceStore.node]),
+  LayerNode.group([
+    Permission.node,
+    PermissionSaved.node,
+    EventV2Bridge.node,
+    CrossSpawnSpawner.node,
+    InstanceStore.node,
+  ]),
   [[InstanceStore.bootstrapNode, noopBootstrap]],
 )
 const it = testEffect(env)
@@ -869,6 +877,55 @@ it.instance(
 
       yield* Fiber.join(a)
       yield* Fiber.join(b)
+      expect(yield* list()).toHaveLength(0)
+    }),
+  { git: true },
+)
+
+it.instance(
+  "reply - always persists approval to saved permissions",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        id: PermissionV1.ID.make("per_saved"),
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["uv pip install numpy"],
+        metadata: {},
+        always: ["uv pip install *"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* reply({ requestID: PermissionV1.ID.make("per_saved"), reply: "always" })
+      yield* Fiber.join(fiber)
+
+      const saved = yield* PermissionSaved.Service
+      const projectID = (yield* InstanceState.context).project.id
+      expect(yield* saved.list({ projectID })).toMatchObject([
+        { projectID, action: "bash", resource: "uv pip install *" },
+      ])
+    }),
+  { git: true },
+)
+
+it.instance(
+  "ask - allows a command from saved always-allow across a fresh in-memory state",
+  () =>
+    Effect.gen(function* () {
+      const saved = yield* PermissionSaved.Service
+      const projectID = (yield* InstanceState.context).project.id
+      yield* saved.add({ projectID, action: "bash", resources: ["uv pip install *"] })
+
+      const result = yield* ask({
+        sessionID: SessionID.make("session_saved"),
+        permission: "bash",
+        patterns: ["uv pip install --python /tmp/probe/bin/python numpy"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(result).toBeUndefined()
       expect(yield* list()).toHaveLength(0)
     }),
   { git: true },

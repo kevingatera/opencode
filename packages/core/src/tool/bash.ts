@@ -15,6 +15,7 @@ import { ToolRegistry } from "./registry"
 import { Tool } from "./tool"
 import { Tools } from "./tools"
 import { BashSearch } from "./bash-search"
+import { BashArity } from "./bash-arity"
 
 export const name = "bash"
 export const DEFAULT_TIMEOUT_MS = 2 * 60 * 1_000
@@ -65,7 +66,6 @@ const isTimeout = (error: AppProcess.AppProcessError) =>
  * legacy shell runtime into core.
  */
 // TODO: Port tree-sitter bash / PowerShell parser-based approval reduction.
-// TODO: Port BashArity reusable command-prefix approvals.
 // TODO: Replace token-based command-argument external-directory advisories with parser-based detection.
 // TODO: Restore PowerShell and cmd-specific invocation/path handling on Windows.
 // TODO: Add plugin shell.env environment augmentation once V2 plugin hooks exist.
@@ -140,10 +140,11 @@ const layer = Layer.effectDiscard(
                 (directory) =>
                   `Command argument references external directory ${path.join(directory, "*").replaceAll("\\", "/")}. Bash runs with host-user filesystem, process, and network authority; this scan is advisory only.`,
               )
+              const prefix = BashArity.prefix(shellTokens(input.command).map(unquote))
               yield* permission.assert({
                 action: name,
                 resources: [input.command],
-                save: [input.command],
+                save: prefix.length ? [`${prefix.join(" ")} *`] : [input.command],
                 sessionID: context.sessionID,
                 agent: context.agent,
                 source,

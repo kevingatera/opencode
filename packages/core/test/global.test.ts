@@ -13,4 +13,10 @@ describe("global paths", () => {
   test("tmp path is created on module load", async () => {
     expect((await fs.stat(Global.Path.tmp)).isDirectory()).toBe(true)
   })
+
+  test("temp globs cover the system temp directory and OpenCode tmp", () => {
+    const globs = Global.tempGlobs()
+    expect(globs).toContain(path.join(os.tmpdir(), "*"))
+    expect(globs).toContain(path.join(Global.Path.tmp, "*"))
+  })
 })

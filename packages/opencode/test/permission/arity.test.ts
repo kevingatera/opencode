@@ -31,3 +31,9 @@ test("edge cases", () => {
   expect(BashArity.prefix(["single"])).toEqual(["single"])
   expect(BashArity.prefix(["git"])).toEqual(["git"])
 })
+
+test("uv prefixes", () => {
+  expect(BashArity.prefix(["uv", "sync", "--frozen"])).toEqual(["uv", "sync"])
+  expect(BashArity.prefix(["uv", "pip", "install", "numpy"])).toEqual(["uv", "pip", "install"])
+  expect(BashArity.prefix(["uv", "run", "pytest", "tests"])).toEqual(["uv", "run", "pytest"])
+})

@@ -1,6 +1,7 @@
 import { afterEach, expect } from "bun:test"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { Cause, Effect, Exit, Layer } from "effect"
+import os from "os"
 import path from "path"
 import { disposeAllInstances, TestInstance } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
@@ -547,6 +548,12 @@ it.instance("global tmp directory children are allowed for external_directory", 
     expect(
       Permission.evaluate("external_directory", path.join(Global.Path.tmp, "scratch"), build!.permission).action,
     ).toBe("allow")
+    expect(
+      Permission.evaluate("external_directory", path.join(os.tmpdir(), "mktemp-scratch"), build!.permission).action,
+    ).toBe("allow")
+    expect(Permission.evaluate("external_directory", path.join(os.tmpdir(), "*"), build!.permission).action).toBe(
+      "allow",
+    )
     expect(Permission.evaluate("external_directory", "/some/other/path", build!.permission).action).toBe("ask")
   }),
 )
