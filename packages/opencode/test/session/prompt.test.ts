@@ -1393,6 +1393,7 @@ it.instance("resuming a completed subagent waits for the new child turn instead 
     const second = tasks[1]
     if (!second || second.state.status !== "completed") return
     expect(second.state.metadata?.sessionId).toBe(childID)
+    expect(second.state.metadata?.subagentType).toBe("general")
     expect(second.state.output).toContain("second-pass complete")
     expect(second.state.output).not.toContain("Recovered task completed")
   }),

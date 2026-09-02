@@ -165,6 +165,7 @@ type TaskMetadata = {
   sessionId: SessionID
   model: { modelID: string; providerID: string }
   directory?: string
+  subagentType?: string
   resumed?: boolean
   background?: boolean
   jobId?: string
@@ -346,6 +347,7 @@ export const TaskTool = Tool.define(
         sessionId: nextSession.id,
         model,
         directory,
+        subagentType: next.name,
         ...(resumed ? { resumed: true } : {}),
         ...(runInBackground ? { background: true } : {}),
       }

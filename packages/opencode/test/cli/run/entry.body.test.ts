@@ -364,6 +364,29 @@ describe("run entry body", () => {
       title: "Inspect reducer · resumed",
       description: "Explore Agent · resumed",
     })
+
+    expect(
+      toolInlineInfo(
+        toolPart("task", {
+          status: "running",
+          input: {
+            description: "Finish OPL scope check",
+            task_id: "ses_child",
+          },
+          title: "Finish OPL scope check",
+          metadata: {
+            sessionId: "ses_child",
+            resumed: true,
+            subagentType: "explore",
+          },
+          time: { start: 1 },
+        }),
+      ),
+    ).toEqual({
+      icon: "•",
+      title: "Finish OPL scope check · resumed",
+      description: "Explore Agent · resumed",
+    })
   })
 
   test("streams tool progress text and treats completed progress as done", () => {

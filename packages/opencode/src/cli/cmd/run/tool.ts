@@ -363,8 +363,16 @@ function runWebSearch(p: ToolProps<typeof WebSearchTool>): ToolInline {
   }
 }
 
+function taskKind(p: { input: { subagent_type?: string }; metadata?: { subagentType?: string } }) {
+  const raw =
+    (typeof p.input.subagent_type === "string" && p.input.subagent_type.trim()) ||
+    (typeof p.metadata?.subagentType === "string" && p.metadata.subagentType.trim()) ||
+    "general"
+  return Locale.titlecase(raw === "general-purpose" ? "general" : raw)
+}
+
 function runTask(p: ToolProps<typeof TaskTool>): ToolInline {
-  const kind = Locale.titlecase(p.input.subagent_type || "unknown")
+  const kind = taskKind(p)
   const desc = p.input.description
   const icon = p.frame.status === "error" ? "✗" : p.frame.status === "running" ? "•" : "✓"
   const label = `${kind} Agent${p.metadata.resumed === true ? " · resumed" : ""}`
@@ -584,7 +592,7 @@ function snapPatch(p: ToolProps<typeof ApplyPatchTool>): ToolSnapshot | undefine
 }
 
 function snapTask(p: ToolProps<typeof TaskTool>): ToolSnapshot {
-  const kind = Locale.titlecase(p.input.subagent_type || "general")
+  const kind = taskKind(p)
   const desc = p.input.description
   const title = text(p.frame.state.title)
   const rows = [desc || title].filter((item): item is string => Boolean(item))
@@ -795,7 +803,7 @@ function scrollTaskFinal(p: ToolProps<typeof TaskTool>): string {
     return fail(p.frame)
   }
 
-  const kind = Locale.titlecase(p.input.subagent_type || "general")
+  const kind = taskKind(p)
   const row = p.input.description || text(p.frame.state.title)
   const suffix = p.metadata.resumed === true ? " · resumed" : ""
   if (!row) {
@@ -992,11 +1000,11 @@ function permBash(p: ToolPermissionProps<typeof BashTool>): ToolPermissionInfo {
 }
 
 function permTask(p: ToolPermissionProps<typeof TaskTool>): ToolPermissionInfo {
-  const type = p.input.subagent_type || "general"
+  const type = taskKind(p)
   const desc = p.input.description
   return {
     icon: "#",
-    title: `${Locale.titlecase(type)} Task`,
+    title: `${type} Task`,
     lines: desc ? [`◉ ${desc}`] : [],
   }
 }

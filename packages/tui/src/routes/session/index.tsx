@@ -2466,53 +2466,62 @@ function Task(props: ToolProps) {
     return assistant - first
   })
 
-  const content = createMemo(() => {
-    const description = stringValue(props.input.description)
-    if (!description) return ""
-    let content = [
-      formatSubagentTitle(
-        Locale.titlecase(stringValue(props.input.subagent_type) ?? "General"),
-        description,
-        props.metadata.background === true,
-      ),
-    ]
-
+  const agentName = createMemo(() =>
+    formatSubagentAgent(
+      stringValue(props.input.subagent_type) ??
+        stringValue(props.metadata.subagentType) ??
+        (sessionID() ? sync.session.get(sessionID()!)?.agent : undefined),
+    ),
+  )
+  const description = createMemo(() => stringValue(props.input.description) ?? "")
+  const title = createMemo(() => {
+    const name = description() || "Task"
+    return formatSubagentTitle(agentName(), name, props.metadata.background === true)
+  })
+  const detail = createMemo(() => {
     const retrying = retry()
     if (isRunning() && retrying) {
-      content.push(`↳ ${formatSubagentRetry(retrying.attempt, Locale.truncate(retrying.message, 80))}`)
-    } else if (isRunning() && tools().length > 0) {
+      return formatSubagentRetry(retrying.attempt, Locale.truncate(retrying.message, 80))
+    }
+    if (isRunning() && tools().length > 0) {
       if (current()) {
-        content.push(`↳ ${formatSubagentCurrentTool(current()!.tool, current()!.state)}`)
-      } else content.push(`↳ ${formatSubagentToolcalls(tools().length)}`)
+        return Locale.truncate(formatSubagentCurrentTool(current()!.tool, current()!.state), 80)
+      }
+      return formatSubagentToolcalls(tools().length)
     }
-
     if (!isRunning() && props.part.state.status === "completed") {
-      content.push(`↳ ${formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))}`)
+      return formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))
     }
-
-    return content.join("\n")
+    return
   })
 
   return (
     <box flexShrink={0}>
-    <InlineTool
-      icon={props.part.state.status === "completed" ? "✓" : "│"}
-      separate={true}
-      color={retry() ? theme.error : undefined}
-      spinner={isRunning()}
-      complete={stringValue(props.input.description)}
-      pending="Delegating..."
-      part={props.part}
-      onClick={() => {
-        if (sessionID()) {
-          navigate({ type: "session", sessionID: sessionID()! })
-        }
-        const status = retry()
-        if (status) void DialogAlert.show(dialog, "Retry Error", status.message)
-      }}
-    >
-      {content()}
-    </InlineTool>
+      <InlineTool
+        icon={props.part.state.status === "completed" ? "✓" : "•"}
+        separate={true}
+        color={retry() ? theme.error : undefined}
+        spinner={isRunning()}
+        complete={description() || title()}
+        pending="Delegating..."
+        part={props.part}
+        onClick={() => {
+          if (sessionID()) {
+            navigate({ type: "session", sessionID: sessionID()! })
+          }
+          const status = retry()
+          if (status) void DialogAlert.show(dialog, "Retry Error", status.message)
+        }}
+      >
+        {title()}
+      </InlineTool>
+      <Show when={detail()}>
+        {(value) => (
+          <text paddingLeft={5} fg={retry() ? theme.error : theme.textMuted}>
+            ↳ {value()}
+          </text>
+        )}
+      </Show>
     </box>
   )
 }
@@ -2556,6 +2565,13 @@ export function formatSubagentCurrentTool(tool: string, state: SubagentToolEntry
 
 export function formatSubagentToolcalls(count: number) {
   return `${count} toolcall${count === 1 ? "" : "s"}`
+}
+
+export function formatSubagentAgent(type: string | undefined) {
+  const name = type?.trim()
+  if (!name) return "General"
+  if (name === "general-purpose") return "General"
+  return Locale.titlecase(name)
 }
 
 export function formatSubagentTitle(agent: string, description: string, background: boolean) {

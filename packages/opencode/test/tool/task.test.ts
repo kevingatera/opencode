@@ -278,6 +278,7 @@ describe("tool.task", () => {
       expect(kids[0]?.id).toBe(child.id)
       expect(result.metadata.sessionId).toBe(child.id)
       expect(result.metadata.resumed).toBe(true)
+      expect(result.metadata.subagentType).toBe("general")
       expect(result.output).toContain(`task_id: ${child.id}`)
       expect(result.output).toContain("resumed: true")
       expect(result.output).toContain("actual_subagent_type: general")

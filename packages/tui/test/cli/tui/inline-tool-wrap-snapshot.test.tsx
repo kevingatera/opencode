@@ -7,6 +7,7 @@ import {
   formatCompletedSubagentDetail,
   formatSubagentCurrentTool,
   formatSubagentRetry,
+  formatSubagentAgent,
   formatSubagentTitle,
   formatSubagentToolcalls,
   InlineToolRow,
@@ -336,6 +337,13 @@ describe("TUI inline tool wrapping", () => {
     expect(formatSubagentTitle("Explore", "Inspect renderer", true)).toBe(
       "Explore Task (background) — Inspect renderer",
     )
+  })
+
+  test("labels resumed tasks from stored type instead of unknown", () => {
+    expect(formatSubagentAgent(undefined)).toBe("General")
+    expect(formatSubagentAgent("")).toBe("General")
+    expect(formatSubagentAgent("general-purpose")).toBe("General")
+    expect(formatSubagentAgent("explore")).toBe("Explore")
   })
 
   test("keeps retry status ahead of wrapping messages", () => {
