@@ -477,6 +477,9 @@ describe("tool.task", () => {
       expect(resolved).toContain("Subagent handoff:")
       expect(resolved).toContain("you are not alone in this codebase")
       expect(resolved).toContain("Do not revert, overwrite, or clean up changes you did not make")
+      expect(resolved).toContain("Working directory:")
+      expect(resolved).not.toContain("Other subagents are already running")
+      expect(resolved).not.toContain("different working trees")
       expect(resolved).toContain("Task session: ses_")
       expect(resolved).toContain("User task:\n\nlook into the cache key path")
     }),
@@ -1222,7 +1225,7 @@ describe("tool.task", () => {
     }),
   )
 
-  background.instance("fresh sibling tasks are read-only while another task is running for the same parent", () =>
+  background.instance("fresh sibling tasks in the same directory keep destructive-shell denies, not an edit lock", () =>
     Effect.gen(function* () {
       const sessions = yield* Session.Service
       const { chat, assistant } = yield* seed()
@@ -1231,6 +1234,7 @@ describe("tool.task", () => {
       const ready = yield* Deferred.make<void>()
       const finish = yield* Deferred.make<void>()
       let prompts = 0
+      let secondPrompt = ""
       const promptOps: TaskPromptOps = {
         ...stubOps(),
         prompt: (input) => {
@@ -1241,6 +1245,7 @@ describe("tool.task", () => {
               yield* Deferred.await(finish)
               return reply(input, "first done")
             })
+          if (input.parts[0]?.type === "text") secondPrompt = input.parts[0].text
           return Effect.succeed(reply(input, "second done"))
         },
       }
@@ -1277,8 +1282,85 @@ describe("tool.task", () => {
       )
 
       const child = yield* sessions.get(second.metadata.sessionId)
-      expect(child.permission).toContainEqual({ permission: "edit", pattern: "*", action: "deny" })
-      expect(child.permission).toContainEqual({ permission: "bash", pattern: "*", action: "deny" })
+      expect(child.permission).not.toContainEqual({ permission: "edit", pattern: "*", action: "deny" })
+      expect(child.permission).not.toContainEqual({ permission: "bash", pattern: "*", action: "ask" })
+      expect(child.permission).not.toContainEqual({ permission: "bash", pattern: "*", action: "deny" })
+      expect(child.permission).toContainEqual({ permission: "bash", pattern: "rm *", action: "deny" })
+      expect(secondPrompt).toContain("Other subagents are already running in this same working directory")
+      expect(secondPrompt).toContain("You may edit files")
+      expect(secondPrompt).toContain("Destructive commands")
+      expect(secondPrompt).not.toContain("ask the user first")
+
+      yield* Deferred.succeed(finish, undefined)
+      yield* Fiber.join(first)
+    }),
+  )
+
+  background.instance("fresh sibling tasks in different working trees keep full edit and bash access", () =>
+    Effect.gen(function* () {
+      const sessions = yield* Session.Service
+      const { chat, assistant } = yield* seed()
+      const tool = yield* TaskTool
+      const def = yield* tool.init()
+      const ready = yield* Deferred.make<void>()
+      const finish = yield* Deferred.make<void>()
+      let prompts = 0
+      let secondPrompt = ""
+      const promptOps: TaskPromptOps = {
+        ...stubOps(),
+        prompt: (input) => {
+          prompts++
+          if (prompts === 1)
+            return Effect.gen(function* () {
+              yield* Deferred.succeed(ready, undefined)
+              yield* Deferred.await(finish)
+              return reply(input, "first done")
+            })
+          if (input.parts[0]?.type === "text") secondPrompt = input.parts[0].text
+          return Effect.succeed(reply(input, "second done"))
+        },
+      }
+      const context = {
+        sessionID: chat.id,
+        messageID: assistant.id,
+        agent: "build",
+        abort: new AbortController().signal,
+        extra: { promptOps },
+        messages: [],
+        metadata: () => Effect.void,
+        ask: () => Effect.void,
+      }
+
+      const first = yield* def
+        .execute(
+          {
+            description: "first worktree",
+            prompt: "update the isolated tree",
+            subagent_type: "general",
+            directory: "/tmp/opencode-wt-a",
+          },
+          context,
+        )
+        .pipe(Effect.forkChild)
+
+      yield* Deferred.await(ready)
+      const second = yield* def.execute(
+        {
+          description: "second worktree",
+          prompt: "update the other isolated tree",
+          subagent_type: "general",
+          directory: "/tmp/opencode-wt-b",
+        },
+        context,
+      )
+
+      const child = yield* sessions.get(second.metadata.sessionId)
+      expect(second.metadata.directory).toBe("/tmp/opencode-wt-b")
+      expect(child.permission ?? []).not.toContainEqual({ permission: "bash", pattern: "*", action: "ask" })
+      expect(child.permission ?? []).not.toContainEqual({ permission: "edit", pattern: "*", action: "deny" })
+      expect(secondPrompt).toContain("different working trees")
+      expect(secondPrompt).toContain("Working directory: /tmp/opencode-wt-b")
+      expect(secondPrompt).not.toContain("Destructive commands")
 
       yield* Deferred.succeed(finish, undefined)
       yield* Fiber.join(first)

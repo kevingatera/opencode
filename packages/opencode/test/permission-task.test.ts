@@ -3,6 +3,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { describe, test, expect } from "bun:test"
 import { Effect } from "effect"
 import { Permission } from "../src/permission"
+import { siblingConcurrencyPermission, siblingSharesDirectory } from "../src/agent/subagent-permissions"
 import { Config } from "@/config/config"
 import { testEffect } from "./lib/effect"
 
@@ -140,6 +141,101 @@ describe("Permission.disabled for task tool", () => {
     // has pattern: "*" and action: "deny". In this case, the last rule matching
     // "task" permission has pattern "orchestrator-coder", not "*", so not disabled
     expect(disabled.has("task")).toBe(false)
+  })
+})
+
+describe("siblingConcurrencyPermission", () => {
+  const rules = siblingConcurrencyPermission()
+
+  test("does not lock file edits", () => {
+    const parent = [{ permission: "*", pattern: "*", action: "allow" as const }]
+    expect(Permission.evaluate("edit", "/tmp/file.ts", parent, rules).action).toBe("allow")
+  })
+
+  test("leaves ordinary commands to the agent ruleset", () => {
+    const parent = [{ permission: "*", pattern: "*", action: "allow" as const }]
+    expect(Permission.evaluate("bash", "ls *", parent, rules).action).toBe("allow")
+    expect(Permission.evaluate("bash", "git status *", parent, rules).action).toBe("allow")
+    expect(Permission.evaluate("bash", "python app.py", parent, rules).action).toBe("allow")
+    expect(Permission.evaluate("bash", "az boards query", parent, rules).action).toBe("allow")
+    expect(Permission.evaluate("bash", "jq -r . foo.json", parent, rules).action).toBe("allow")
+  })
+
+  test("blocks destructive shell prefixes", () => {
+    expect(Permission.evaluate("bash", "rm *", rules).action).toBe("deny")
+    expect(Permission.evaluate("bash", "git checkout *", rules).action).toBe("deny")
+  })
+
+  test("does not prompt on unknown commands over a parent bash allow", () => {
+    const parent = [{ permission: "bash", pattern: "*", action: "allow" as const }]
+    expect(Permission.evaluate("bash", "python app.py", parent, rules).action).toBe("allow")
+    expect(Permission.evaluate("bash", "ls *", parent, rules).action).toBe("allow")
+    expect(Permission.evaluate("bash", "rm *", parent, rules).action).toBe("deny")
+  })
+
+  test("ignores the current session when detecting a shared directory", () => {
+    expect(
+      siblingSharesDirectory({
+        parentID: "ses_parent",
+        directory: "/tmp/repo",
+        excludeSessionID: "ses_self",
+        jobs: [
+          {
+            type: "task",
+            status: "running",
+            metadata: { parentSessionId: "ses_parent", sessionId: "ses_self", directory: "/tmp/repo" },
+          },
+        ],
+      }),
+    ).toBe(false)
+  })
+
+  test("treats siblings as sharing a directory when metadata is missing", () => {
+    expect(
+      siblingSharesDirectory({
+        parentID: "ses_parent",
+        directory: "/tmp/repo",
+        jobs: [
+          {
+            type: "task",
+            status: "running",
+            metadata: { parentSessionId: "ses_parent" },
+          },
+        ],
+      }),
+    ).toBe(true)
+  })
+
+  test("does not sandbox siblings in different working trees", () => {
+    expect(
+      siblingSharesDirectory({
+        parentID: "ses_parent",
+        directory: "/tmp/repo/.worktrees/a",
+        jobs: [
+          {
+            type: "task",
+            status: "running",
+            metadata: { parentSessionId: "ses_parent", directory: "/tmp/repo/.worktrees/b" },
+          },
+        ],
+      }),
+    ).toBe(false)
+  })
+
+  test("sandboxes siblings that resolve to the same directory", () => {
+    expect(
+      siblingSharesDirectory({
+        parentID: "ses_parent",
+        directory: "/tmp/repo/.worktrees/a",
+        jobs: [
+          {
+            type: "task",
+            status: "running",
+            metadata: { parentSessionId: "ses_parent", directory: "/tmp/repo/.worktrees/a/../a" },
+          },
+        ],
+      }),
+    ).toBe(true)
   })
 })
 

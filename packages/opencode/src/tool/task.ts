@@ -7,7 +7,13 @@ import { Session } from "@/session/session"
 import { SessionID, MessageID } from "../session/schema"
 import { MessageV2 } from "../session/message-v2"
 import { Agent } from "../agent/agent"
-import { deriveSubagentSessionPermission } from "../agent/subagent-permissions"
+import {
+  deriveSubagentSessionPermission,
+  resolveTaskDirectory,
+  siblingConcurrencyPermission,
+  siblingSharesDirectory,
+} from "../agent/subagent-permissions"
+import { InstanceState } from "@/effect/instance-state"
 import type { SessionPrompt } from "../session/prompt"
 import { Config } from "@/config/config"
 import { Effect, Exit, Schema, Scope } from "effect"
@@ -39,15 +45,21 @@ const BACKGROUND_UPDATED = [
   "DO NOT sleep, poll for progress, ask the task for status, or duplicate this task's work — avoid working with the same files or topics it is using.",
   "Work on non-overlapping tasks, or briefly tell the user what you sent and end your response.",
 ].join("\n")
-const SIBLING_TASK_MUTATION_DENIES = [
-  { permission: "edit" as const, pattern: "*" as const, action: "deny" as const },
-  { permission: "bash" as const, pattern: "*" as const, action: "deny" as const },
-]
 const SUBAGENT_HANDOFF = [
   "Subagent handoff:",
   "- Remember that you are not alone in this codebase. The parent agent and other subagents may be editing files at the same time.",
   "- Do not revert, overwrite, or clean up changes you did not make. If you notice unexpected diffs, treat them as someone else's in-progress work and adapt around them.",
   "- Stay within the task's assigned scope. If code changes are requested, keep edits focused and list every changed file in your final response.",
+].join("\n")
+const SIBLING_SHARED_HANDOFF = [
+  "Other subagents are already running in this same working directory:",
+  "- You may edit files. Stay in the paths this task assigned you. Do not revert, overwrite, or clean up in-progress work you did not make.",
+  "- If you notice unexpected diffs, treat them as someone else's work and adapt around them.",
+  "- Destructive commands (rm, git checkout/reset/stash, and similar) are blocked while siblings share this directory. Other commands are allowed.",
+].join("\n")
+const SIBLING_ISOLATED_HANDOFF = [
+  "Other subagents are running in different working trees.",
+  "- Stay in this working directory. Do not modify their trees or files outside this task's scope.",
 ].join("\n")
 
 const BaseParameterFields = {
@@ -62,6 +74,10 @@ const BaseParameterFields = {
       "Optional prior task_id (the id from a previous Task result) to continue the same subagent session instead of creating a fresh one. Prefer this for follow-ups like continue, also check this, or tell that agent to do X, whether the subagent is running or stopped. When set, do not also pass a conflicting subagent_type.",
   }),
   command: Schema.optional(Schema.String).annotate({ description: "The command that triggered this task" }),
+  directory: Schema.optional(Schema.String).annotate({
+    description:
+      "Optional working directory for this subagent. Relative paths resolve from the parent session directory. When this differs from other running subagents of the same parent, they are treated as isolated trees (no shared-directory destructive-shell denies).",
+  }),
 }
 
 const BaseParameters = Schema.Struct(BaseParameterFields)
@@ -112,10 +128,19 @@ function subagentDepthLimit(cfg: unknown) {
   return typeof cfg.subagent_depth === "number" ? cfg.subagent_depth : 1
 }
 
-function formatSubagentPrompt(input: { prompt: string; taskID: SessionID; resumed: boolean }) {
+function formatSubagentPrompt(input: {
+  prompt: string
+  taskID: SessionID
+  resumed: boolean
+  directory: string
+  sibling: "shared" | "isolated" | false
+}) {
   return [
     SUBAGENT_HANDOFF,
+    ...(input.sibling === "shared" ? [SIBLING_SHARED_HANDOFF] : []),
+    ...(input.sibling === "isolated" ? [SIBLING_ISOLATED_HANDOFF] : []),
     `Task session: ${input.taskID}${input.resumed ? " (resumed)" : ""}`,
+    `Working directory: ${input.directory}`,
     "User task:",
     input.prompt,
   ].join("\n\n")
@@ -139,6 +164,7 @@ type TaskMetadata = {
   parentSessionId: SessionID
   sessionId: SessionID
   model: { modelID: string; providerID: string }
+  directory?: string
   resumed?: boolean
   background?: boolean
   jobId?: string
@@ -246,11 +272,23 @@ export const TaskTool = Tool.define(
         )
       }
 
-      const siblingTaskRunning =
-        !session &&
-        (yield* background.list()).some(
-          (job) => job.type === id && job.status === "running" && job.metadata?.parentSessionId === ctx.sessionID,
-        )
+      const jobs = yield* background.list()
+      const directory = resolveTaskDirectory((yield* InstanceState.context).directory, params.directory)
+      const siblingShared = siblingSharesDirectory({
+        jobs,
+        parentID: ctx.sessionID,
+        directory,
+        taskType: id,
+        excludeSessionID: session?.id,
+      })
+      const siblingRunning = jobs.some(
+        (job) =>
+          job.type === id &&
+          job.status === "running" &&
+          job.metadata?.parentSessionId === ctx.sessionID &&
+          job.metadata?.sessionId !== session?.id,
+      )
+      const sibling = siblingShared ? "shared" : siblingRunning ? "isolated" : false
       const parentAgent = parent.agent ? yield* agent.get(parent.agent) : undefined
       const childPermission = deriveSubagentSessionPermission({
         parentSessionPermission: parent.permission ?? [],
@@ -258,7 +296,7 @@ export const TaskTool = Tool.define(
         subagent: next,
       })
       const childToolDenies = [
-        ...(siblingTaskRunning ? SIBLING_TASK_MUTATION_DENIES : []),
+        ...(siblingShared ? siblingConcurrencyPermission() : []),
         ...(next.permission.some((rule) => rule.permission === "todowrite")
           ? []
           : [{ permission: "todowrite" as const, pattern: "*" as const, action: "deny" as const }]),
@@ -271,23 +309,25 @@ export const TaskTool = Tool.define(
           action: "deny" as const,
         })) ?? []),
       ]
+      const permission = [
+        ...childPermission,
+        ...childToolDenies.filter(
+          (deny) =>
+            !childPermission.some(
+              (rule) =>
+                rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
+            ),
+        ),
+      ]
       const nextSession =
         session ??
         (yield* sessions.create({
           parentID: ctx.sessionID,
           title: params.description + ` (@${next.name} subagent)`,
           agent: next.name,
-          permission: [
-            ...childPermission,
-            ...childToolDenies.filter(
-              (deny) =>
-                !childPermission.some(
-                  (rule) =>
-                    rule.permission === deny.permission && rule.pattern === deny.pattern && rule.action === deny.action,
-                ),
-            ),
-          ],
+          permission,
         }))
+      if (session) yield* sessions.setPermission({ sessionID: session.id, permission })
 
       const msg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
         Effect.provideService(Database.Service, database),
@@ -305,6 +345,7 @@ export const TaskTool = Tool.define(
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        directory,
         ...(resumed ? { resumed: true } : {}),
         ...(runInBackground ? { background: true } : {}),
       }
@@ -336,6 +377,8 @@ export const TaskTool = Tool.define(
             prompt: params.prompt,
             taskID: nextSession.id,
             resumed,
+            directory,
+            sibling,
           }),
         )
         const result = yield* ops.prompt({
