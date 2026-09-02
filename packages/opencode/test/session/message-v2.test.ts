@@ -1974,6 +1974,27 @@ describe("session.message-v2.latest", () => {
     expect(state.user?.id).toBe(higher.id)
   })
 
+  test("selects a post-wrap compact request after a pre-wrap finished assistant", () => {
+    const wrap = 26 * 2 ** 36
+    const oldUser = { ...userInfo("msg_faa6b0e0e001YgRgotkCncxvuZ"), time: { created: wrap - 2 } }
+    const oldAssistant = {
+      ...assistantInfo("msg_faa6bbefa0018LxuI72A5pED0i", oldUser.id),
+      time: { created: wrap - 1 },
+      finish: "stop",
+    } as SessionV1.Assistant
+    const compactUser: SessionV1.WithParts = {
+      info: { ...userInfo("msg_015408907001Ug0rot3xuWy6BE"), time: { created: wrap + 1000 } },
+      parts: [{ ...basePart("msg_015408907001Ug0rot3xuWy6BE", "p1"), type: "compaction", auto: false }] as SessionV1.Part[],
+    }
+
+    const state = MessageV2.latest([{ info: oldUser, parts: [] }, { info: oldAssistant, parts: [] }, compactUser])
+
+    expect(state.user?.id).toBe(compactUser.info.id)
+    expect(state.finished?.id).toBe(oldAssistant.id)
+    expect(state.tasks).toHaveLength(1)
+    expect(state.tasks[0]).toMatchObject({ type: "compaction", auto: false })
+  })
+
   // Regression for double auto-compaction. The reorder in filterCompacted
   // (#27145) returns [compaction-user, summary, ...tail..., continue-user],
   // so picking lastFinished by array position landed on the pre-compaction

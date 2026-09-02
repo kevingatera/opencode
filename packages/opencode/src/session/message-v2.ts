@@ -685,7 +685,9 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
 // filterCompacted reorders messages for model consumption
 // ([compaction-user, summary, ...retained tail..., continue-user]), so array
 // position is not chronological. IDs are only a deterministic tie-breaker
-// because imported messages do not necessarily have monotonic IDs.
+// because imported messages and 48-bit identifier wrap (2026-08-14) are not
+// lexicographically monotonic. tasks are compaction/subtask parts attached to
+// user messages newer than the latest finished assistant.
 export function latest(msgs: WithParts[]) {
   let user: User | undefined
   let assistant: Assistant | undefined
