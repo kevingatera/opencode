@@ -81,40 +81,6 @@ IMPORTANT:
 
 const STRUCTURED_OUTPUT_SYSTEM_PROMPT = `IMPORTANT: The user has requested structured output. You MUST use the StructuredOutput tool to provide your final response. Do NOT respond with plain text - you MUST call the StructuredOutput tool with your answer formatted according to the schema.`
 
-function titlePartText(part: SessionV1.Part) {
-  if (part.type === "text" && part.text) return part.text
-  if (part.type === "subtask" && part.prompt) return part.prompt
-  return ""
-}
-
-function titleMessageText(message: SessionV1.WithParts) {
-  return message.parts
-    .map(titlePartText)
-    .filter((text) => text.length > 0)
-    .join("\n")
-    .trim()
-}
-
-function clipTitleText(text: string, max: number) {
-  const compact = text.replace(/\s+/g, " ").trim()
-  return compact.length > max ? compact.slice(0, max - 1) + "…" : compact
-}
-
-export function titleDigest(input: { title: string; history: SessionV1.WithParts[] }) {
-  const real = (message: SessionV1.WithParts) =>
-    message.info.role === "user" && !message.parts.every((part) => "synthetic" in part && part.synthetic)
-  const users = input.history.filter(real).map(titleMessageText).filter(Boolean)
-  const lastAssistant = input.history.findLast((message) => message.info.role === "assistant")
-  const latestWork = lastAssistant ? titleMessageText(lastAssistant) : ""
-  const lines = []
-  if (input.title && !Session.isDefaultTitle(input.title)) lines.push(`Current title: ${input.title}`)
-  if (users[0]) lines.push(`First request: ${clipTitleText(users[0], 400)}`)
-  const later = users.slice(1).slice(-3)
-  if (later.length) lines.push(`Later requests:\n${later.map((text) => clipTitleText(text, 300)).join("\n")}`)
-  if (latestWork) lines.push(`Latest work: ${clipTitleText(latestWork, 400)}`)
-  return lines.join("\n\n")
-}
-
 function mcpResourceBase64Size(value: string) {
   const trimmed = value.replace(/\s/g, "")
   const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0
@@ -231,18 +197,22 @@ const layer = Layer.effect(
       providerID: ProviderV2.ID
       modelID: ModelV2.ID
     }) {
-      const live = yield* sessions.get(input.session.id).pipe(Effect.orDie)
-      if (live.parentID) return
-      if (!Session.isAutoManagedTitle(live)) return
+      if (input.session.parentID) return
+      if (!Session.isDefaultTitle(input.session.title)) return
 
       const real = (m: SessionV1.WithParts) =>
         m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
-      const users = input.history.filter(real)
-      const firstUser = users[0]
-      if (!firstUser || firstUser.info.role !== "user") return
+      const idx = input.history.findIndex(real)
+      if (idx === -1) return
+      if (input.history.filter(real).length !== 1) return
 
-      const digest = titleDigest({ title: live.title, history: input.history })
-      if (!digest) return
+      const context = input.history.slice(0, idx + 1)
+      const firstUser = context[idx]
+      if (!firstUser || firstUser.info.role !== "user") return
+      const firstInfo = firstUser.info
+
+      const subtasks = firstUser.parts.filter((p): p is SessionV1.SubtaskPart => p.type === "subtask")
+      const onlySubtasks = subtasks.length > 0 && firstUser.parts.every((p) => p.type === "subtask")
 
       const ag = yield* agents.get("title")
       if (!ag) return
@@ -250,17 +220,20 @@ const layer = Layer.effect(
         ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
         : ((yield* provider.getSmallModel(input.providerID)) ??
           (yield* provider.getModel(input.providerID, input.modelID)))
+      const msgs = onlySubtasks
+        ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
+        : yield* MessageV2.toModelMessagesEffect(context, mdl)
       const text = yield* llm
         .stream({
           agent: ag,
-          user: firstUser.info,
+          user: firstInfo,
           system: [],
           small: true,
           tools: {},
           model: mdl,
-          sessionID: live.id,
+          sessionID: input.session.id,
           retries: 2,
-          messages: [{ role: "user", content: "Generate a title for this conversation:\n" + digest }],
+          messages: [{ role: "user", content: "Generate a title for this conversation:\n" }, ...msgs],
         })
         .pipe(
           Stream.filter(LLMEvent.is.textDelta),
@@ -275,9 +248,8 @@ const layer = Layer.effect(
         .find((line) => line.length > 0)
       if (!cleaned) return
       const t = cleaned.length > 100 ? cleaned.substring(0, 97) + "..." : cleaned
-      if (t === live.title) return
       yield* sessions
-        .setTitle({ sessionID: live.id, title: t, source: "auto" })
+        .setTitle({ sessionID: input.session.id, title: t })
         .pipe(Effect.catchCause((cause) => Effect.logError("failed to generate title", { error: Cause.squash(cause) })))
     })
 
@@ -1454,19 +1426,6 @@ const layer = Layer.effect(
         }
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
-        const latest = yield* MessageV2.filterCompactedEffect(sessionID).pipe(
-          Effect.provideService(Database.Service, database),
-        )
-        const finished = yield* sessions.get(sessionID).pipe(Effect.orDie)
-        const last = MessageV2.latest(latest).user
-        if (last) {
-          yield* title({
-            session: finished,
-            history: latest,
-            modelID: last.model.modelID,
-            providerID: last.model.providerID,
-          }).pipe(Effect.ignore, Effect.forkIn(scope))
-        }
         return yield* lastAssistant(sessionID)
       },
     )
