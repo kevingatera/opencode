@@ -354,4 +354,44 @@ describe("opencode run (non-interactive subprocess)", () => {
         expect((text?.part as { text?: string } | undefined)?.text).toContain('"ok":true')
       }),
     60_000,
+  )
+
+  cliIt.concurrent(
+    "--format json completes a task tool without aborting the parent",
+    ({ llm, opencode }) =>
+      Effect.gen(function* () {
+        yield* llm.tool("task", {
+          description: "inspect files",
+          prompt: "reply with child-ok and stop",
+          subagent_type: "general",
+        })
+        yield* llm.text("child-ok")
+        yield* llm.text("parent-ok")
+        const result = yield* opencode.run("delegate a short inspect to a subagent, then summarize", {
+          format: "json",
+          extraArgs: ["--dangerously-skip-permissions"],
+        })
+        opencode.expectExit(result, 0)
+
+        const events = opencode.parseJsonEvents(result.stdout)
+        const tools = events.filter((event) => event.type === "tool_use")
+        expect(tools.length).toBeGreaterThan(0)
+        expect(
+          tools.every((event) => {
+            const part = event.part as { tool?: string; state?: { status?: string; error?: string } } | undefined
+            if (part?.tool !== "task") return true
+            return part.state?.status === "completed" && part.state.error !== "Tool execution aborted"
+          }),
+        ).toBe(true)
+        const completed = tools.find((event) => {
+          const part = event.part as { tool?: string; state?: { status?: string; output?: string } } | undefined
+          return part?.tool === "task" && part.state?.status === "completed"
+        })
+        expect(completed).toBeDefined()
+        const output = (completed?.part as { state?: { output?: string } } | undefined)?.state?.output ?? ""
+        expect(output).toContain("child-ok")
+        expect(output).not.toContain("Tool execution aborted")
+        expect(output).not.toContain("Recovered task completed")
+      }),
+    60_000,
   )})

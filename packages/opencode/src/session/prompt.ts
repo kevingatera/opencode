@@ -1090,11 +1090,19 @@ const layer = Layer.effect(
     })
 
 
-    const childTaskResult = (msgs: SessionV1.WithParts[]) => {
-      const assistant = msgs.findLast((message) => message.info.role === "assistant")
-      if (!assistant || assistant.info.role !== "assistant") return
-      if (!assistant.info.finish || assistant.info.finish === "tool-calls") return
-      const text = assistant.parts
+    const childTaskResult = (msgs: SessionV1.WithParts[], startedAt: number) => {
+      // Chronological last message, not ID order — post-wrap MessageIDs sort before older ones.
+      const last = msgs.toSorted(
+        (a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id),
+      ).at(-1)
+      if (!last || last.info.role !== "assistant") return
+      if (!last.info.finish || last.info.finish === "tool-calls") return
+      const finishedAt = last.info.time.completed ?? last.info.time.created
+      // A finished turn from before this parent Task started is the previous
+      // run. Treating it as done aborts live resumes: recover marks the parent
+      // tool complete, then processor cleanup overwrites it as aborted.
+      if (finishedAt < startedAt) return
+      const text = last.parts
         .filter((part): part is SessionV1.TextPart => part.type === "text")
         .map((part) => part.text)
         .join("\n")
@@ -1123,7 +1131,7 @@ const layer = Layer.effect(
           if (options?.childSessionID && childSessionID !== options.childSessionID) continue
 
           const childMsgs = yield* sessions.messages({ sessionID: childSessionID })
-          const text = childTaskResult(childMsgs)
+          const text = childTaskResult(childMsgs, part.state.time.start)
           if (!text) continue
 
           const description =

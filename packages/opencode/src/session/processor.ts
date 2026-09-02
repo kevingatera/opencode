@@ -169,7 +169,11 @@ const layer = Layer.effect(
         },
       ) {
         const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return
+        if (!match) return
+        if (match.part.state.status !== "running") {
+          yield* settleToolCall(toolCallID)
+          return
+        }
         yield* session.updatePart({
           ...match.part,
           state: {
@@ -187,7 +191,11 @@ const layer = Layer.effect(
 
       const failToolCall = Effect.fn("SessionProcessor.failToolCall")(function* (toolCallID: string, error: unknown) {
         const match = yield* readToolCall(toolCallID)
-        if (!match || match.part.state.status !== "running") return false
+        if (!match) return false
+        if (match.part.state.status !== "running") {
+          yield* settleToolCall(toolCallID)
+          return false
+        }
         yield* session.updatePart({
           ...match.part,
           state: {
