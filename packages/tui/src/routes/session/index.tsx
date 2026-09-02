@@ -95,6 +95,7 @@ const GO_UPSELL_ACCOUNT_RATE_LIMIT_LAST_SEEN_AT = "go_upsell_account_rate_limit_
 const GO_UPSELL_ACCOUNT_RATE_LIMIT_DONT_SHOW = "go_upsell_account_rate_limit_dont_show"
 const GO_UPSELL_WINDOW = 86_400_000 // 24 hrs
 const GO_UPSELL_PROVIDERS = new Set(["opencode", "opencode-go"])
+const COLLAPSED_DIFF_LINES = 40
 
 export const alwaysSeparate = new WeakSet<BoxRenderable>()
 
@@ -1281,6 +1282,7 @@ export function Session() {
                 stickyStart="bottom"
                 viewportCulling={true}
                 flexGrow={1}
+                minHeight={0}
                 scrollAcceleration={scrollAcceleration()}
               >
                 <box height={1} />
@@ -1296,6 +1298,7 @@ export function Session() {
                 </Show>
                 <For each={messages()}>
                   {(message, index) => (
+                    <box flexShrink={0} flexDirection="column">
                     <Switch>
                       <Match when={message.id === revert()?.messageID}>
                         {(function () {
@@ -1388,6 +1391,7 @@ export function Session() {
                         />
                       </Match>
                     </Switch>
+                    </box>
                   )}
                 </For>
               </scrollbox>
@@ -1518,6 +1522,7 @@ function UserMessage(props: {
           borderColor={color()}
           customBorderChars={SplitBorder.customBorderChars}
           marginTop={props.index === 0 ? 0 : 1}
+          flexShrink={0}
         >
           <box
             onMouseOver={() => {
@@ -1752,7 +1757,7 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
             <code
               filetype="markdown"
               drawUnstyledText={false}
-              streaming={true}
+              streaming={!isDone()}
               syntaxStyle={syntax()}
               content={summary().body}
               conceal={ctx.conceal()}
@@ -1808,7 +1813,7 @@ function TextPart(props: { last: boolean; part: TextPart; message: AssistantMess
       <box ref={(el: BoxRenderable) => alwaysSeparate.add(el)} paddingLeft={3} marginTop={1} flexShrink={0}>
         <markdown
           syntaxStyle={syntax()}
-          streaming={true}
+          streaming={!props.message.time.completed}
           internalBlockMode="top-level"
           content={props.part.text.trim()}
           tableOptions={{ style: "grid" }}
@@ -2064,6 +2069,7 @@ export function InlineToolRow(props: {
   return (
     <box
       paddingLeft={3}
+      flexShrink={0}
       onMouseOver={props.onMouseOver}
       onMouseOut={props.onMouseOut}
       onMouseUp={props.onMouseUp}
@@ -2142,6 +2148,7 @@ function BlockTool(props: {
       paddingLeft={2}
       marginTop={1}
       gap={1}
+      flexShrink={0}
       backgroundColor={hover() ? theme.backgroundMenu : theme.backgroundPanel}
       customBorderChars={SplitBorder.customBorderChars}
       borderColor={theme.background}
@@ -2487,6 +2494,7 @@ function Task(props: ToolProps) {
   })
 
   return (
+    <box flexShrink={0}>
     <InlineTool
       icon={props.part.state.status === "completed" ? "✓" : "│"}
       separate={true}
@@ -2505,6 +2513,7 @@ function Task(props: ToolProps) {
     >
       {content()}
     </InlineTool>
+    </box>
   )
 }
 
@@ -2662,12 +2671,27 @@ function Edit(props: ToolProps) {
   })
 
   const ft = createMemo(() => filetype(filePath()))
+  const [diffExpanded, setDiffExpanded] = createSignal(false)
+  const diffLines = createMemo(() => diffContent().split("\n").length)
+  const showFullDiff = createMemo(() => diffExpanded() || diffLines() <= COLLAPSED_DIFF_LINES)
 
   return (
     <Switch>
       <Match when={stringValue(props.metadata.diff) !== undefined}>
-        <BlockTool title={"← Edit " + pathFormatter.format(filePath())} part={props.part}>
+        <BlockTool
+          title={"← Edit " + pathFormatter.format(filePath())}
+          part={props.part}
+          onClick={diffLines() > COLLAPSED_DIFF_LINES ? () => setDiffExpanded((value) => !value) : undefined}
+        >
           <box paddingLeft={1}>
+            <Show
+              when={showFullDiff()}
+              fallback={
+                <text fg={theme.textMuted}>
+                  {diffLines()} line diff · click to expand
+                </text>
+              }
+            >
             <TuiDiff
               diff={diffContent()}
               view={view()}
@@ -2690,6 +2714,7 @@ function Edit(props: ToolProps) {
               highlightAddedBg={theme.diffHighlightAddedBg}
               highlightRemovedBg={theme.diffHighlightRemovedBg}
             />
+            </Show>
           </box>
           <Diagnostics diagnostics={props.metadata.diagnostics} filePath={filePath() ?? ""} />
         </BlockTool>
@@ -2704,74 +2729,13 @@ function Edit(props: ToolProps) {
 }
 
 function ApplyPatch(props: ToolProps) {
-  const ctx = use()
-  const { theme, syntax } = useTheme()
-  const pathFormatter = usePathFormatter()
-
   const files = createMemo(() => parseApplyPatchFiles(props.metadata.files))
-
-  const view = createMemo(() => {
-    return resolveDiffView({
-      diffStyle: ctx.tui.diff_style,
-      width: ctx.width,
-    })
-  })
-
-  function Diff(p: { diff: string; filePath: string }) {
-    return (
-      <box paddingLeft={1}>
-        <TuiDiff
-          diff={p.diff}
-          view={view()}
-          splitWidth={ctx.width - 2}
-          filetype={filetype(p.filePath)}
-          syntaxStyle={syntax()}
-          showLineNumbers={true}
-          width="100%"
-          wrapMode={ctx.diffWrapMode()}
-          fg={theme.text}
-          addedBg={theme.diffAddedBg}
-          removedBg={theme.diffRemovedBg}
-          contextBg={theme.diffContextBg}
-          addedSignColor={theme.diffHighlightAdded}
-          removedSignColor={theme.diffHighlightRemoved}
-          lineNumberFg={theme.diffLineNumber}
-          lineNumberBg={theme.diffContextBg}
-          addedLineNumberBg={theme.diffAddedLineNumberBg}
-          removedLineNumberBg={theme.diffRemovedLineNumberBg}
-          highlightAddedBg={theme.diffHighlightAddedBg}
-          highlightRemovedBg={theme.diffHighlightRemovedBg}
-        />
-      </box>
-    )
-  }
-
-  function title(file: { type: string; relativePath: string; filePath: string; deletions: number }) {
-    if (file.type === "delete") return "# Deleted " + file.relativePath
-    if (file.type === "add") return "# Created " + file.relativePath
-    if (file.type === "move") return "# Moved " + pathFormatter.format(file.filePath) + " → " + file.relativePath
-    return "← Patched " + file.relativePath
-  }
 
   return (
     <Switch>
       <Match when={files().length > 0}>
         <For each={files()}>
-          {(file) => (
-            <BlockTool title={title(file)} part={props.part}>
-              <Show
-                when={file.type !== "delete"}
-                fallback={
-                  <text fg={theme.diffRemoved}>
-                    -{file.deletions} line{file.deletions !== 1 ? "s" : ""}
-                  </text>
-                }
-              >
-                <Diff diff={file.patch} filePath={file.filePath} />
-                <Diagnostics diagnostics={props.metadata.diagnostics} filePath={file.movePath ?? file.filePath} />
-              </Show>
-            </BlockTool>
-          )}
+          {(file) => <ApplyPatchFile file={file} part={props.part} diagnostics={props.metadata.diagnostics} />}
         </For>
       </Match>
       <Match when={true}>
@@ -2780,6 +2744,90 @@ function ApplyPatch(props: ToolProps) {
         </InlineTool>
       </Match>
     </Switch>
+  )
+}
+
+function ApplyPatchFile(props: {
+  file: ReturnType<typeof parseApplyPatchFiles>[number]
+  part: ToolPart
+  diagnostics: unknown
+}) {
+  const ctx = use()
+  const { theme, syntax } = useTheme()
+  const pathFormatter = usePathFormatter()
+  const [diffExpanded, setDiffExpanded] = createSignal(false)
+  const diffLines = createMemo(() => props.file.patch.split("\n").length)
+  const showFullDiff = createMemo(() => diffExpanded() || diffLines() <= COLLAPSED_DIFF_LINES)
+  const view = createMemo(() => {
+    return resolveDiffView({
+      diffStyle: ctx.tui.diff_style,
+      width: ctx.width,
+    })
+  })
+
+  const title = createMemo(() => {
+    if (props.file.type === "delete") return "# Deleted " + props.file.relativePath
+    if (props.file.type === "add") return "# Created " + props.file.relativePath
+    if (props.file.type === "move") {
+      return "# Moved " + pathFormatter.format(props.file.filePath) + " → " + props.file.relativePath
+    }
+    return "← Patched " + props.file.relativePath
+  })
+
+  return (
+    <BlockTool
+      title={title()}
+      part={props.part}
+      onClick={
+        props.file.type !== "delete" && diffLines() > COLLAPSED_DIFF_LINES
+          ? () => setDiffExpanded((value) => !value)
+          : undefined
+      }
+    >
+      <Show
+        when={props.file.type !== "delete"}
+        fallback={
+          <text fg={theme.diffRemoved}>
+            -{props.file.deletions} line{props.file.deletions !== 1 ? "s" : ""}
+          </text>
+        }
+      >
+        <box paddingLeft={1}>
+          <Show
+            when={showFullDiff()}
+            fallback={
+              <text fg={theme.textMuted}>
+                {diffLines()} line diff · click to expand
+              </text>
+            }
+          >
+            <TuiDiff
+              diff={props.file.patch}
+              view={view()}
+              splitWidth={ctx.width - 2}
+              filetype={filetype(props.file.filePath)}
+              syntaxStyle={syntax()}
+              showLineNumbers={true}
+              width="100%"
+              wrapMode={ctx.diffWrapMode()}
+              fg={theme.text}
+              addedBg={theme.diffAddedBg}
+              removedBg={theme.diffRemovedBg}
+              contextBg={theme.diffContextBg}
+              addedSignColor={theme.diffHighlightAdded}
+              removedSignColor={theme.diffHighlightRemoved}
+              lineNumberFg={theme.diffLineNumber}
+              lineNumberBg={theme.diffContextBg}
+              addedLineNumberBg={theme.diffAddedLineNumberBg}
+              removedLineNumberBg={theme.diffRemovedLineNumberBg}
+              highlightAddedBg={theme.diffHighlightAddedBg}
+              highlightRemovedBg={theme.diffHighlightRemovedBg}
+            />
+          </Show>
+        </box>
+        <Diagnostics diagnostics={props.diagnostics} filePath={props.file.movePath ?? props.file.filePath} />
+      </Show>
+    </BlockTool>
   )
 }
 

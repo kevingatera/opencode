@@ -7,6 +7,7 @@ const SCROLL_POLL_MS = 100
 // Minimum gap between two older-history loads so a single scroll-to-top
 // gesture cannot fan out into a burst of page requests.
 const LOAD_COOLDOWN_MS = 350
+const LOAD_FAIL_COOLDOWN_MS = 2_000
 
 export function useSessionMessageScroll(input: {
   sessionID: () => string
@@ -19,6 +20,7 @@ export function useSessionMessageScroll(input: {
   let anchorReady = false
   let loadingOlder = false
   let cooldownUntil = 0
+  let pagedThisTopVisit = false
 
   function viewportHeight(scroll: ScrollBoxRenderable) {
     return scroll.viewport.height || scroll.height
@@ -28,6 +30,7 @@ export function useSessionMessageScroll(input: {
     anchorReady = false
     loadingOlder = false
     cooldownUntil = 0
+    pagedThisTopVisit = false
     lastTop = -1
   }
 
@@ -56,15 +59,19 @@ export function useSessionMessageScroll(input: {
     if (nearBottom) {
       anchorReady = true
       input.sync.session.messages.setFollowing(sessionID, true)
-      input.sync.session.messages.trimToWindow(sessionID)
+      // Do not trim here. Dropping older rows the instant the viewport
+      // returns to the bottom collapses scrollHeight and can crush the
+      // prompt. Live following already trims on incoming messages.
     } else if (anchorReady) {
       input.sync.session.messages.setFollowing(sessionID, false)
     }
 
-    if (loadingOlder || !anchorReady || !nearTop || !overflows) return
-    if (Date.now() < cooldownUntil) return
+    if (!nearTop) pagedThisTopVisit = false
 
     const page = input.sync.session.messages.page(sessionID)
+    if (loadingOlder || !anchorReady || !nearTop || pagedThisTopVisit) return
+    if (overflows === false && page?.olderComplete) return
+    if (Date.now() < cooldownUntil) return
     if (!page || page.loading || page.olderComplete) return
 
     loadingOlder = true
@@ -72,10 +79,14 @@ export function useSessionMessageScroll(input: {
     const prevTop = scroll.scrollTop
     try {
       const loaded = await input.sync.session.messages.loadOlder(sessionID)
-      if (!loaded) return
+      if (!loaded) {
+        cooldownUntil = Date.now() + LOAD_FAIL_COOLDOWN_MS
+        return
+      }
+      pagedThisTopVisit = true
       // Restore the viewport anchor after older rows are prepended above.
-      // A single load per gesture is intentional: the next page only loads
-      // once the user scrolls back up to the top, detected by the poll.
+      // A single successful load per gesture is intentional: the next page
+      // only loads once the user scrolls back up to the top.
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
       const current = input.scroll()
       if (current && !current.isDestroyed) {
@@ -84,7 +95,7 @@ export function useSessionMessageScroll(input: {
       }
     } finally {
       loadingOlder = false
-      cooldownUntil = Date.now() + LOAD_COOLDOWN_MS
+      if (Date.now() >= cooldownUntil) cooldownUntil = Date.now() + LOAD_COOLDOWN_MS
     }
   }
 
@@ -115,7 +126,14 @@ export function useSessionMessageScroll(input: {
       const scroll = input.scroll()
       if (!scroll || scroll.isDestroyed) return
       if (loadingOlder) return
-      if (scroll.scrollTop === lastTop) return
+      const page = input.sync.session.messages.page(input.sessionID())
+      const shouldPageAtTop =
+        !pagedThisTopVisit &&
+        scroll.scrollTop <= EDGE_THRESHOLD &&
+        !!page &&
+        !page.loading &&
+        !page.olderComplete
+      if (scroll.scrollTop === lastTop && !shouldPageAtTop) return
       lastTop = scroll.scrollTop
       queuePaginate()
     }, SCROLL_POLL_MS)

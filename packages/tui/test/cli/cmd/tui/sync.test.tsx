@@ -320,6 +320,9 @@ describe("tui sync", () => {
       expect(sync.data.message[sessionID]).toHaveLength(100)
       expect(sync.data.message[sessionID]?.at(-1)?.id).toBe("msg_100")
       expect(sync.data.part.msg_000).toBeUndefined()
+      expect(sync.session.messages.page(sessionID)?.olderComplete).toBe(false)
+      expect(sync.session.messages.page(sessionID)?.olderCursor).toBeTruthy()
+      expect(sync.data.message[sessionID]?.[0]?.id).toBe("msg_001")
     } finally {
       app.renderer.destroy()
     }

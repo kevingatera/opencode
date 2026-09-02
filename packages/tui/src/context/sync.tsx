@@ -40,7 +40,9 @@ const emptyConsoleState: ConsoleState = {
 
 const MESSAGE_BOOTSTRAP_LIMIT = 100
 const MESSAGE_WINDOW_LIMIT = 100
-const MESSAGE_PAGE_SIZE = 50
+const MESSAGE_PAGE_SIZE = 20
+const FILE_URL_SLIM_CHARS = 8_000
+const LOAD_OLDER_TIMEOUT_MS = 15_000
 
 type MessagePageState = {
   olderCursor?: string
@@ -63,6 +65,16 @@ function search<T>(items: T[], target: string, key: (item: T) => string) {
 
 function compareMessage(a: Message, b: Message) {
   return a.time.created - b.time.created || a.id.localeCompare(b.id)
+}
+
+function encodeMessageCursor(message: Message) {
+  return Buffer.from(JSON.stringify({ id: message.id, time: message.time.created })).toString("base64url")
+}
+
+function slimPart(part: Part): Part {
+  if (part.type !== "file") return part
+  if (!("url" in part) || typeof part.url !== "string" || part.url.length < FILE_URL_SLIM_CHARS) return part
+  return { ...part, url: "" }
 }
 
 const messageKey = (message: Message) => message.time.created + message.id
@@ -216,7 +228,7 @@ export const {
           for (const item of incoming) {
             const currentParts = draft.part[item.info.id] ?? []
             draft.part[item.info.id] = [
-              ...new Map([...currentParts, ...item.parts].map((part) => [part.id, part])).values(),
+              ...new Map([...currentParts, ...item.parts].map(slimPart).map((part) => [part.id, part])).values(),
             ].toSorted((a, b) => a.id.localeCompare(b.id))
           }
         }),
@@ -236,10 +248,12 @@ export const {
             for (const message of removed) delete draft[message.id]
           }),
         )
-        const page = store.messagePage[sessionID]
-        if (page?.olderComplete) {
-          setStore("messagePage", sessionID, "olderComplete", false)
-        }
+        const oldest = visible[0]
+        setStore("messagePage", sessionID, {
+          olderCursor: oldest ? encodeMessageCursor(oldest) : store.messagePage[sessionID]?.olderCursor,
+          olderComplete: false,
+          loading: store.messagePage[sessionID]?.loading ?? false,
+        })
       })
     }
 
@@ -679,21 +693,32 @@ export const {
           },
           async loadOlder(sessionID: string) {
             const page = store.messagePage[sessionID]
-            if (!page || page.loading || page.olderComplete || !page.olderCursor) return false
+            if (!page || page.loading || page.olderComplete) return false
+            const oldest = store.message[sessionID]?.[0]
+            const before = page.olderCursor ?? (oldest ? encodeMessageCursor(oldest) : undefined)
+            if (!before) {
+              setStore("messagePage", sessionID, "olderComplete", true)
+              return false
+            }
 
             setStore("messagePage", sessionID, "loading", true)
             try {
-              const response = await sdk.client.session.messages({
-                sessionID,
-                limit: MESSAGE_PAGE_SIZE,
-                before: page.olderCursor,
-              })
+              const response = await Promise.race([
+                sdk.client.session.messages({
+                  sessionID,
+                  limit: MESSAGE_PAGE_SIZE,
+                  before,
+                }),
+                new Promise<never>((_, reject) => {
+                  setTimeout(() => reject(new Error("loadOlder timed out")), LOAD_OLDER_TIMEOUT_MS)
+                }),
+              ])
               const items = response.data ?? []
               mergeSessionMessages(sessionID, items)
               const cursor = response.response.headers.get("x-next-cursor") ?? undefined
               setStore("messagePage", sessionID, {
                 olderCursor: cursor,
-                olderComplete: !cursor,
+                olderComplete: items.length === 0 || !cursor,
                 loading: false,
               })
               return items.length > 0
