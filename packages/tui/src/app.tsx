@@ -56,6 +56,7 @@ import { Session } from "./routes/session"
 import { PromptHistoryProvider } from "./component/prompt/history"
 import { FrecencyProvider } from "./component/prompt/frecency"
 import { PromptStashProvider } from "./component/prompt/stash"
+import { PromptHoldProvider } from "./component/prompt/hold"
 import { DialogAlert } from "./ui/dialog-alert"
 import { DialogConfirm } from "./ui/dialog-confirm"
 import { ToastProvider, useToast } from "./ui/toast"
@@ -331,7 +332,8 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                   <ThemeProvider mode={mode}>
                                                     <LocalProvider>
                                                       <PromptStashProvider>
-                                                        <DialogProvider>
+                                                        <PromptHoldProvider>
+                                                          <DialogProvider>
                                                           <FrecencyProvider>
                                                             <PromptHistoryProvider>
                                                               <PromptRefProvider>
@@ -347,6 +349,7 @@ export const run = Effect.fn("Tui.run")(function* (input: TuiInput) {
                                                             </PromptHistoryProvider>
                                                           </FrecencyProvider>
                                                         </DialogProvider>
+                                                        </PromptHoldProvider>
                                                       </PromptStashProvider>
                                                     </LocalProvider>
                                                   </ThemeProvider>
@@ -731,10 +734,11 @@ function App(props: { onSnapshot?: () => Promise<string[]>; pluginHost: TuiPlugi
       },
       {
         name: "agent.cycle",
-        title: "Agent cycle",
+        title: "Next agent / queue",
         category: "Agent",
         hidden: true,
         run: () => {
+          if (promptRef.current?.queue()) return
           local.agent.move(1)
         },
       },

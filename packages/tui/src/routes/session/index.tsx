@@ -1501,10 +1501,10 @@ function UserMessage(props: {
   const files = createMemo(() => props.parts.flatMap((x) => (x.type === "file" ? [x] : [])))
   const { theme } = useTheme()
   const [hover, setHover] = createSignal(false)
-  const queued = createMemo(() => props.pending !== undefined && props.index > props.pending)
+  const steered = createMemo(() => props.pending !== undefined && props.index > props.pending)
   const color = createMemo(() => local.agent.color(props.message.agent))
-  const queuedFg = createMemo(() => selectedForeground(theme, color()))
-  const metadataVisible = createMemo(() => queued() || ctx.showTimestamps())
+  const steeredFg = createMemo(() => selectedForeground(theme, color()))
+  const metadataVisible = createMemo(() => steered() || ctx.showTimestamps())
 
   const compaction = createMemo(() => props.parts.find((x) => x.type === "compaction"))
 
@@ -1552,7 +1552,7 @@ function UserMessage(props: {
               </box>
             </Show>
             <Show
-              when={queued()}
+              when={steered()}
               fallback={
                 <Show when={ctx.showTimestamps()}>
                   <text fg={theme.textMuted}>
@@ -1564,7 +1564,7 @@ function UserMessage(props: {
               }
             >
               <text fg={theme.textMuted}>
-                <span style={{ bg: color(), fg: queuedFg(), bold: true }}> QUEUED </span>
+                <span style={{ bg: color(), fg: steeredFg(), bold: true }}> STEER </span>
               </text>
             </Show>
           </box>

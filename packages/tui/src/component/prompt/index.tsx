@@ -9,13 +9,13 @@ import {
   type Renderable,
 } from "@opentui/core"
 import type { CommandContext } from "@opentui/keymap"
-import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match } from "solid-js"
+import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match, For } from "solid-js"
 import { registerOpencodeSpinner } from "../register-spinner"
 import path from "path"
 import { fileURLToPath } from "url"
 import { useLocal } from "../../context/local"
 import { Flag } from "@opencode-ai/core/flag/flag"
-import { tint, useTheme } from "../../context/theme"
+import { selectedForeground, tint, useTheme } from "../../context/theme"
 import { EmptyBorder, SplitBorder } from "../../ui/border"
 import { useTuiPaths, useTuiTerminalEnvironment } from "../../context/runtime"
 import { useClipboard } from "../../context/clipboard"
@@ -34,6 +34,7 @@ import { usePromptHistory, type PromptInfo } from "../../prompt/history"
 import { computePromptTraits } from "../../prompt/traits"
 import { expandPastedTextPlaceholders, expandTrackedPastedText } from "../../prompt/part"
 import { usePromptStash } from "../../prompt/stash"
+import { HOME_KEY, holdSessionKey, isTurnComplete, previewHold, usePromptHold } from "../../prompt/hold"
 import { DialogStash } from "../dialog-stash"
 import { type AutocompleteRef, Autocomplete } from "./autocomplete"
 import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
@@ -94,6 +95,7 @@ export type PromptRef = {
   blur(): void
   focus(): void
   submit(): void
+  queue(): boolean
 }
 
 const money = new Intl.NumberFormat("en-US", {
@@ -179,6 +181,39 @@ export function Prompt(props: PromptProps) {
   const status = createMemo(() => sync.data.session_status?.[props.sessionID ?? ""] ?? { type: "idle" })
   const history = usePromptHistory()
   const stash = usePromptStash()
+  const later = usePromptHold()
+  const laterKey = createMemo(() => holdSessionKey(props.sessionID))
+  const laterItems = createMemo(() => later.list(laterKey()))
+  const turnComplete = createMemo(() => {
+    if (!props.sessionID) return false
+    const messages = sync.data.message[props.sessionID] ?? []
+    let lastUserCreated: number | undefined
+    let lastFinishedAssistantCreated: number | undefined
+    for (const message of messages) {
+      if (message.role === "user") {
+        if (lastUserCreated === undefined || message.time.created > lastUserCreated) {
+          lastUserCreated = message.time.created
+        }
+        continue
+      }
+      if (message.role === "assistant" && message.finish && message.finish !== "tool-calls") {
+        if (
+          lastFinishedAssistantCreated === undefined ||
+          message.time.created > lastFinishedAssistantCreated
+        ) {
+          lastFinishedAssistantCreated = message.time.created
+        }
+      }
+    }
+    return isTurnComplete({
+      status: status().type,
+      childStatuses: sync.data.session
+        .filter((session) => session.parentID === props.sessionID)
+        .map((session) => sync.data.session_status[session.id]?.type ?? "idle"),
+      lastUserCreated,
+      lastFinishedAssistantCreated,
+    })
+  })
   const keymap = useOpencodeKeymap()
   const agentShortcut = useCommandShortcut("agent.cycle")
   const paletteShortcut = useCommandShortcut("command.palette.show")
@@ -186,6 +221,8 @@ export function Prompt(props: PromptProps) {
   const exit = useExit()
   const dimensions = useTerminalDimensions()
   const { theme, syntax } = useTheme()
+  const laterFg = createMemo(() => selectedForeground(theme, theme.accent))
+  const [editingQueueId, setEditingQueueId] = createSignal<string>()
   const kv = useKV()
   const animationsEnabled = createMemo(() => kv.get("animations_enabled", true))
   const list = createMemo(() => props.placeholders?.normal ?? [])
@@ -597,6 +634,99 @@ export function Prompt(props: PromptProps) {
     ]),
   }))
 
+  function syncPromptInput() {
+    if (input && !input.isDestroyed && input.plainText !== store.prompt.input) {
+      setStore("prompt", "input", input.plainText)
+      syncExtmarksWithPromptParts()
+    }
+  }
+
+  function capturePrompt(): PromptInfo | undefined {
+    syncPromptInput()
+    if (!store.prompt.input.trim()) return
+    return {
+      input: store.prompt.input,
+      parts: store.prompt.parts,
+      mode: store.mode,
+    }
+  }
+
+  function applyPrompt(prompt: PromptInfo) {
+    input.setText(prompt.input)
+    setStore("prompt", { input: prompt.input, parts: prompt.parts })
+    setStore("mode", prompt.mode ?? "normal")
+    restoreExtmarksFromParts(prompt.parts)
+    input.gotoBufferEnd()
+  }
+
+  function persistQueueEdit() {
+    const id = editingQueueId()
+    if (!id) return false
+    syncPromptInput()
+    return later.replace(laterKey(), id, {
+      input: store.prompt.input,
+      parts: store.prompt.parts,
+      mode: store.mode,
+    })
+  }
+
+  function closeQueueEdit() {
+    persistQueueEdit()
+    setEditingQueueId()
+    input.extmarks.clear()
+    input.clear()
+    setStore("prompt", { input: "", parts: [] })
+    setStore("extmarkToPartIndex", new Map())
+  }
+
+  function holdTypedPrompt() {
+    if (props.disabled) return false
+    if (auto()?.visible) return false
+    if (editingQueueId()) {
+      closeQueueEdit()
+      return true
+    }
+    const prompt = capturePrompt()
+    if (!prompt) return false
+    later.push(laterKey(), prompt)
+    input.extmarks.clear()
+    input.clear()
+    setStore("prompt", { input: "", parts: [] })
+    setStore("extmarkToPartIndex", new Map())
+    return true
+  }
+
+  function restoreLater(id?: string) {
+    const target = id ?? laterItems()[0]?.id
+    if (!target) return false
+    if (editingQueueId() === target) return true
+    if (editingQueueId()) persistQueueEdit()
+    else {
+      const current = capturePrompt()
+      if (current) later.push(laterKey(), current)
+    }
+    const entry = later.list(laterKey()).find((item) => item.id === target)
+    if (!entry) return false
+    setEditingQueueId(target)
+    applyPrompt(entry)
+    return true
+  }
+
+  function dropLater(id?: string) {
+    const target = id ?? laterItems()[0]?.id
+    if (!target) return false
+    const removed = later.remove(laterKey(), target)
+    if (!removed) return false
+    if (editingQueueId() === target) {
+      setEditingQueueId()
+      input.extmarks.clear()
+      input.clear()
+      setStore("prompt", { input: "", parts: [] })
+      setStore("extmarkToPartIndex", new Map())
+    }
+    return true
+  }
+
   const ref: PromptRef = {
     get focused() {
       return input.focused
@@ -627,6 +757,9 @@ export function Prompt(props: PromptProps) {
     },
     submit() {
       void submit()
+    },
+    queue() {
+      return holdTypedPrompt()
     },
   }
 
@@ -854,6 +987,45 @@ export function Prompt(props: PromptProps) {
     commands: stashCommands(),
   }))
 
+  const laterCommands = createMemo(() =>
+    [
+      {
+        title: "Queue prompt",
+        name: "prompt.queue",
+        category: "Prompt",
+        enabled: !!store.prompt.input.trim(),
+        run: () => {
+          holdTypedPrompt()
+        },
+      },
+      {
+        title: "Edit next queued prompt",
+        name: "prompt.queue.edit",
+        category: "Prompt",
+        enabled: laterItems().length > 0,
+        run: () => {
+          restoreLater()
+        },
+      },
+      {
+        title: "Drop next queued prompt",
+        name: "prompt.queue.drop",
+        category: "Prompt",
+        enabled: laterItems().length > 0,
+        run: () => {
+          dropLater()
+        },
+      },
+    ].map((entry) => ({
+      namespace: "palette",
+      ...entry,
+    })),
+  )
+
+  useBindings(() => ({
+    commands: laterCommands(),
+  }))
+
   useBindings(() => {
     return {
       target: inputTarget,
@@ -1014,7 +1186,19 @@ export function Prompt(props: PromptProps) {
     if (props.disabled) return false
     if (workspace.creating() || move.creating()) return false
     if (auto()?.visible) return false
-    if (!store.prompt.input) return false
+    if (editingQueueId()) {
+      persistQueueEdit()
+      if (props.sessionID && !turnComplete()) return true
+      const next = later.remove(laterKey(), editingQueueId()!)
+      setEditingQueueId()
+      if (!next) return false
+      applyPrompt(next)
+    } else if (!store.prompt.input) {
+      if (props.sessionID && !turnComplete()) return false
+      const next = later.take(laterKey())
+      if (!next) return false
+      applyPrompt(next)
+    }
     const agent = local.agent.current()
     if (!agent) return false
     const trimmed = store.prompt.input.trim()
@@ -1079,6 +1263,7 @@ export function Prompt(props: PromptProps) {
       }
 
       sessionID = res.data.id
+      later.adopt(HOME_KEY, sessionID)
     }
 
     const inputText = expandTrackedPastedText(
@@ -1214,6 +1399,19 @@ export function Prompt(props: PromptProps) {
     if (finishMoveProgress) move.finishSubmit()
     return true
   }
+
+  createEffect(
+    on(turnComplete, (complete) => {
+      if (!complete) return
+      if (props.disabled) return
+      if (dialog.stack.length > 0) return
+      if (auto()?.visible) return
+      if (editingQueueId()) return
+      if (store.prompt.input.trim()) return
+      if (laterItems().length === 0) return
+      void submit()
+    }),
+  )
 
   function pasteText(text: string, virtualText: string) {
     const currentOffset = input.cursorOffset
@@ -1435,6 +1633,43 @@ export function Prompt(props: PromptProps) {
             flexGrow={1}
             width="100%"
           >
+            <Show when={laterItems().length > 0}>
+              <box flexShrink={0} paddingBottom={1} gap={0}>
+                <box flexDirection="row" gap={1} flexShrink={0}>
+                  <text>
+                    <span style={{ bg: theme.accent, fg: laterFg(), bold: true }}> QUEUE </span>
+                  </text>
+                  <text fg={theme.textMuted}>
+                    {editingQueueId()
+                      ? "editing · won't send until you leave this draft"
+                      : turnComplete()
+                        ? "sends next"
+                        : "after this turn"}
+                  </text>
+                </box>
+                <For each={laterItems()}>
+                  {(item, index) => (
+                    <box flexDirection="row" gap={1} flexShrink={0}>
+                      <box
+                        flexGrow={1}
+                        flexDirection="row"
+                        gap={1}
+                        onMouseUp={() => restoreLater(item.id)}
+                      >
+                        <text fg={editingQueueId() === item.id ? theme.accent : theme.textMuted}>{index() + 1}</text>
+                        <text fg={editingQueueId() === item.id ? theme.accent : theme.text}>
+                          {editingQueueId() === item.id ? "editing · " : ""}
+                          {previewHold(item.input)}
+                        </text>
+                      </box>
+                      <box onMouseUp={() => dropLater(item.id)}>
+                        <text fg={theme.textMuted}>x</text>
+                      </box>
+                    </box>
+                  )}
+                </For>
+              </box>
+            </Show>
             <textarea
               width="100%"
               placeholder={placeholderText()}
@@ -1450,6 +1685,7 @@ export function Prompt(props: PromptProps) {
                 syncExtmarksWithPromptParts()
                 syncSlashCommandExtmark(value)
                 setCursorVersion((value) => value + 1)
+                persistQueueEdit()
               }}
               onCursorChange={() => setCursorVersion((value) => value + 1)}
               onKeyDown={(e: { preventDefault(): void }) => {
