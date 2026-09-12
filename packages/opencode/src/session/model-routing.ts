@@ -190,19 +190,29 @@ const layer = Layer.effect(
       model: Model
     }) {
       const action = input.action.trim() || "status"
-      if (!["same", "curated", "status"].includes(action)) {
-        return "Usage: /routing same|curated|status. Legacy SessionPrompt only; V2 routing is not enforced."
+      if (!["same", "curated", "status", "refresh"].includes(action)) {
+        return "Usage: /routing same|curated|status|refresh. Legacy SessionPrompt only; V2 routing is not enforced."
       }
       const loaded = yield* load(input.sessionID, input.model)
       if (!loaded)
         return "Legacy model routing is off. Configure model_routing with scope and role candidates to opt in. V2 routing is not enforced."
-      const scope = action === "same" || action === "curated" ? action : loaded.state.scope
-      if (scope !== loaded.state.scope) yield* storage.write(loaded.key, { ...loaded.state, scope }).pipe(Effect.orDie)
+      const cfg = yield* config.get()
+      if (action === "refresh" && !cfg.model_routing) {
+        yield* storage.remove(loaded.key).pipe(Effect.orDie)
+        return `Legacy model routing is off for root ${loaded.root.id}: model_routing config was removed, so the stored routing state was deleted. V2 routing is not enforced.`
+      }
+      const state =
+        action === "refresh" && cfg.model_routing
+          ? { ...cfg.model_routing, anchor: loaded.state.anchor, pins: loaded.state.pins }
+          : loaded.state
+      if (state !== loaded.state) yield* storage.write(loaded.key, state).pipe(Effect.orDie)
+      const scope = action === "same" || action === "curated" ? action : state.scope
+      if (scope !== state.scope) yield* storage.write(loaded.key, { ...state, scope }).pipe(Effect.orDie)
       const roles = yield* Effect.forEach(
-        Object.keys(loaded.state.roles).toSorted(),
+        Object.keys(state.roles).toSorted(),
         Effect.fnUntraced(function* (role) {
           const result = yield* selection(
-            { ...loaded, state: { ...loaded.state, scope } },
+            { ...loaded, state: { ...state, scope } },
             {
               sessionID: input.sessionID,
               role,
@@ -216,14 +226,14 @@ const layer = Layer.effect(
       return [
         `Legacy model routing: ${scope}`,
         `Root session: ${loaded.root.id}`,
-        `Provider anchor: ${loaded.state.anchor.providerID}`,
+        `Provider anchor: ${state.anchor.providerID}`,
         ...roles,
-        `Unconfigured child and auxiliary roles: ${loaded.state.anchor.providerID}/${loaded.state.anchor.modelID} (subject to availability and child provider pin)`,
-        "Role candidates are snapshotted when this root opts in. Configured roles always use their candidate lists; with anchor_fallback enabled, a same-scope role with no matching candidate runs the anchor model instead of failing (shown as anchor fallback above).",
+        `Unconfigured child and auxiliary roles: ${state.anchor.providerID}/${state.anchor.modelID} (subject to availability and child provider pin)`,
+        "Role candidates are snapshotted when this root opts in; /routing refresh rewrites the snapshot (scope, anchor_fallback, roles) from the current config while keeping the anchor and child provider pins, and removes the stored state when model_routing config is gone. Configured roles always use their candidate lists; with anchor_fallback enabled, a same-scope role with no matching candidate runs the anchor model instead of failing (shown as anchor fallback above).",
         "For unconfigured root roles, /models selects the main model: same allows the anchor provider; curated also allows explicit choices from other permitted available providers.",
         "The provider anchor stays fixed when /models changes, so switching back to same restores the original provider restriction.",
         "Applies to this root and nested children. Resumed children retain their provider; incompatible routes fail without fallback.",
-        "Scope changes apply to subsequent LLM calls, not requests already in flight. V2 session routing is not enforced.",
+        "Scope changes apply to subsequent LLM calls, not requests already in flight. V2 sessions share this id space, but the V2 runner resolves models through the catalog without consulting routing state, so V2 turns are not gated.",
       ].join("\n")
     }, lock.withPermits(1))
 

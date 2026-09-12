@@ -400,6 +400,101 @@ it.instance(
   { config },
 )
 
+// A module-level override lets refresh tests edit model_routing mid-test while
+// every service (sessions, storage, provider) stays on one shared instance.
+let configOverride: Config.Info | undefined
+const itOverridable = testEffect(
+  AppNodeBuilder.build(
+    LayerNode.group([
+      ModelRouting.node,
+      Session.node,
+      SessionProjector.node,
+      Storage.node,
+      Config.node,
+      LLM.node,
+      Agent.node,
+      Provider.node,
+    ]),
+    [[Config.node, Layer.mock(Config.Service, { get: () => Effect.succeed(configOverride ?? config) })]],
+  ),
+)
+
+itOverridable.instance(
+  "refresh adopts edited config roles on an existing root",
+  () =>
+    Effect.gen(function* () {
+      configOverride = undefined
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      expect(yield* routing.resolve({ sessionID: root.id, role: "general", model: a })).toMatchObject(a)
+      configOverride = {
+        ...config,
+        model_routing: { scope: "curated", roles: { general: ["route-b/claude"] } },
+      }
+      const text = yield* routing.command({ sessionID: root.id, action: "refresh", model: a })
+      expect(text).toContain("general: route-b/claude")
+      expect(yield* routing.resolve({ sessionID: root.id, role: "general", model: a })).toMatchObject(b)
+      const storage = yield* Storage.Service
+      expect(yield* storage.read(["model_routing", root.id])).toMatchObject({
+        anchor: a,
+        scope: "curated",
+        roles: { general: ["route-b/claude"] },
+      })
+    }),
+  { config },
+)
+
+itOverridable.instance(
+  "refresh with routing config removed turns routing off for the root",
+  () =>
+    Effect.gen(function* () {
+      configOverride = undefined
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      yield* routing.command({ sessionID: root.id, action: "curated", model: a })
+      configOverride = { ...config, model_routing: undefined }
+      const text = yield* routing.command({ sessionID: root.id, action: "refresh", model: a })
+      expect(text).toContain("routing is off")
+      expect(text).toContain("removed")
+      const storage = yield* Storage.Service
+      const stored = yield* storage.read(["model_routing", root.id]).pipe(Effect.exit)
+      expect(Exit.isFailure(stored)).toBe(true)
+      expect(yield* routing.resolve({ sessionID: root.id, role: "general", model: b })).toEqual(b)
+    }),
+  { config },
+)
+
+itOverridable.instance(
+  "refresh preserves the anchor and child provider pins",
+  () =>
+    Effect.gen(function* () {
+      configOverride = undefined
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, title: "Child" })
+      yield* routing.command({ sessionID: root.id, action: "curated", model: a })
+      expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: a })).toMatchObject(b)
+      configOverride = {
+        ...config,
+        model_routing: { scope: "same", roles: { general: ["route-a/claude"] } },
+      }
+      yield* routing.command({ sessionID: root.id, action: "refresh", model: a })
+      const storage = yield* Storage.Service
+      expect(yield* storage.read(["model_routing", root.id])).toMatchObject({
+        anchor: a,
+        pins: { [child.id]: b.providerID },
+      })
+      // The child keeps its pinned provider, so the refreshed same-scope candidates cannot satisfy it.
+      const result = yield* routing.resolve({ sessionID: child.id, role: "general", model: a }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toContain("child pinned to route-b")
+    }),
+  { config },
+)
+
 it.instance(
   "parallel child admission does not lose durable provider pins",
   () =>

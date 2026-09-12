@@ -6,7 +6,7 @@ import * as AnthropicMessages from "@opencode-ai/llm/protocols/anthropic-message
 import * as OpenAICompatibleChat from "@opencode-ai/llm/protocols/openai-compatible-chat"
 import * as OpenAIResponses from "@opencode-ai/llm/protocols/openai-responses"
 import { Auth, type AnyRoute } from "@opencode-ai/llm/route"
-import { Context, Effect, Layer, Schema } from "effect"
+import { Context, Effect, Layer, Option, Schema } from "effect"
 import { produce } from "immer"
 import { Catalog } from "../../catalog"
 import { Credential } from "../../credential"
@@ -64,12 +64,46 @@ export class UnsupportedApiError extends Schema.TaggedErrorClass<UnsupportedApiE
   }
 }
 
+export class RoutingViolationError extends Schema.TaggedErrorClass<RoutingViolationError>()(
+  "SessionRunnerModel.RoutingViolationError",
+  {
+    sessionID: SessionSchema.ID,
+    providerID: ProviderV2.ID,
+    modelID: ModelV2.ID,
+    reason: Schema.String,
+  },
+) {
+  override get message() {
+    return `Routing rejected ${this.providerID}/${this.modelID} for session ${this.sessionID}: ${this.reason}`
+  }
+}
+
 export type Error =
   | ModelNotSelectedError
   | ModelUnavailableError
   | VariantUnavailableError
   | UnsupportedApiError
+  | RoutingViolationError
   | Integration.AuthorizationError
+
+export interface RoutingGateInterface {
+  /**
+   * Optional enforcement seam for legacy model routing. Legacy routing state
+   * (config plus per-root Storage) lives outside core, so core cannot resolve
+   * the policy itself; when a host provides this gate, model resolution
+   * consults it and fails closed on rejection.
+   */
+  readonly check: (input: {
+    sessionID: SessionSchema.ID
+    role: string | undefined
+    providerID: ProviderV2.ID
+    modelID: ModelV2.ID
+  }) => Effect.Effect<void, RoutingViolationError>
+}
+
+export class RoutingGate extends Context.Service<RoutingGate, RoutingGateInterface>()(
+  "@opencode/v2/SessionRoutingGate",
+) {}
 
 export interface Interface {
   readonly resolve: (session: SessionSchema.Info) => Effect.Effect<Model, Error>
@@ -201,6 +235,14 @@ export const locationLayer = Layer.effect(
             modelID: session.model.id,
           })
         if (!selected) return yield* new ModelNotSelectedError({ sessionID: session.id })
+        const gate = Option.getOrUndefined(yield* Effect.serviceOption(RoutingGate))
+        if (gate)
+          yield* gate.check({
+            sessionID: session.id,
+            role: session.agent,
+            providerID: selected.providerID,
+            modelID: selected.id,
+          })
         const provider = yield* catalog.provider.get(selected.providerID)
         const connection = yield* integrations.connection.active(
           provider?.integrationID ?? Integration.ID.make(selected.providerID),

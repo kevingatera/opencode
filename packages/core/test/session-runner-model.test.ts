@@ -1,10 +1,12 @@
 import { describe, expect } from "bun:test"
 import { LLM } from "@opencode-ai/llm"
 import { LLMClient } from "@opencode-ai/llm/route"
-import { DateTime, Effect } from "effect"
+import { DateTime, Effect, Layer } from "effect"
 import { Headers } from "effect/unstable/http"
+import { Catalog } from "@opencode-ai/core/catalog"
 import { Credential } from "@opencode-ai/core/credential"
 import { Integration } from "@opencode-ai/core/integration"
+import { AgentV2 } from "@opencode-ai/core/agent"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ProjectV2 } from "@opencode-ai/core/project"
@@ -344,4 +346,127 @@ describe("SessionRunnerModel", () => {
       expect(SessionRunnerModel.supported(model({ type: "native", settings: {} }))).toBe(false)
     }),
   )
+
+  const catalogModel = model({ type: "aisdk", package: "@ai-sdk/openai", url: "https://openai.example/v1" })
+  const catalogLayer = Layer.mock(Catalog.Service, {
+    provider: {
+      get: () => Effect.succeed(undefined),
+      all: () => Effect.die("unexpected provider.all"),
+      available: () => Effect.die("unexpected provider.available"),
+    },
+    model: {
+      get: () => Effect.succeed(undefined),
+      all: () => Effect.die("unexpected model.all"),
+      available: () => Effect.succeed([catalogModel]),
+      default: () => Effect.succeed(catalogModel),
+      small: () => Effect.succeed(undefined),
+    },
+  })
+  const integrationLayer = Layer.mock(Integration.Service, {
+    connection: {
+      active: () => Effect.succeed(undefined),
+      resolve: () => Effect.die("unexpected connection.resolve"),
+      key: () => Effect.die("unexpected connection.key"),
+      oauth: () => Effect.die("unexpected connection.oauth"),
+      update: () => Effect.die("unexpected connection.update"),
+      remove: () => Effect.die("unexpected connection.remove"),
+    },
+    attempt: {
+      status: () => Effect.die("unexpected attempt.status"),
+      complete: () => Effect.die("unexpected attempt.complete"),
+      cancel: () => Effect.die("unexpected attempt.cancel"),
+    },
+  })
+  const gateSession = SessionV2.Info.make({
+    id: SessionV2.ID.make("ses_gate_check"),
+    projectID: ProjectV2.ID.global,
+    title: "test",
+    agent: AgentV2.ID.make("build"),
+    model: { id: catalogModel.id, providerID: catalogModel.providerID },
+    cost: 0,
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    time: { created: DateTime.makeUnsafe(0), updated: DateTime.makeUnsafe(0) },
+    location: { directory: AbsolutePath.make("/project") },
+  })
+  const resolveLayer = (gate?: Layer.Layer<SessionRunnerModel.RoutingGate>) =>
+    gate
+      ? SessionRunnerModel.locationLayer.pipe(
+          Layer.provideMerge(catalogLayer),
+          Layer.provideMerge(integrationLayer),
+          Layer.provideMerge(gate),
+        )
+      : SessionRunnerModel.locationLayer.pipe(
+          Layer.provideMerge(catalogLayer),
+          Layer.provideMerge(integrationLayer),
+        )
+
+  it.effect("resolves without a routing gate when the host does not provide one", () =>
+    Effect.gen(function* () {
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(gateSession)
+      expect(resolved).toMatchObject({ id: "api-test-model", provider: "test-provider" })
+    }).pipe(Effect.provide(resolveLayer())),
+  )
+  it.effect("consults a provided routing gate with session attribution", () => {
+    const calls: Array<{ sessionID: string; role: string | undefined; providerID: string; modelID: string }> = []
+    const gate = Layer.succeed(
+      SessionRunnerModel.RoutingGate,
+      SessionRunnerModel.RoutingGate.of({
+        check: (input) =>
+          Effect.sync(() => {
+            calls.push({
+              sessionID: input.sessionID,
+              role: input.role,
+              providerID: input.providerID,
+              modelID: input.modelID,
+            })
+          }),
+      }),
+    )
+    return Effect.gen(function* () {
+      const models = yield* SessionRunnerModel.Service
+      const resolved = yield* models.resolve(gateSession)
+
+      expect(resolved).toMatchObject({ id: "api-test-model", provider: "test-provider" })
+      expect(calls).toEqual([
+        {
+          sessionID: gateSession.id,
+          role: "build",
+          providerID: catalogModel.providerID,
+          modelID: catalogModel.id,
+        },
+      ])
+    }).pipe(Effect.provide(resolveLayer(gate)))
+  })
+
+  it.effect("fails closed when the provided routing gate rejects the selected model", () => {
+    const gate = Layer.succeed(
+      SessionRunnerModel.RoutingGate,
+      SessionRunnerModel.RoutingGate.of({
+        check: (input) =>
+          Effect.fail(
+            new SessionRunnerModel.RoutingViolationError({
+              sessionID: input.sessionID,
+              providerID: input.providerID,
+              modelID: input.modelID,
+              reason: "same scope forbids other providers",
+            }),
+          ),
+      }),
+    )
+    return Effect.gen(function* () {
+      const models = yield* SessionRunnerModel.Service
+      const failure = yield* models.resolve(gateSession).pipe(Effect.flip)
+
+      expect(failure).toMatchObject({
+        _tag: "SessionRunnerModel.RoutingViolationError",
+        sessionID: gateSession.id,
+        providerID: "test-provider",
+        modelID: "test-model",
+      })
+      expect(failure.message).toBe(
+        `Routing rejected test-provider/test-model for session ${gateSession.id}: same scope forbids other providers`,
+      )
+    }).pipe(Effect.provide(resolveLayer(gate)))
+  })
 })
