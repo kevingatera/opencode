@@ -229,6 +229,37 @@ for (const role of ["nongpt", "empty"]) {
   )
 }
 
+const fallbackConfig: Config.Info = {
+  ...config,
+  model_routing: {
+    scope: "same",
+    anchor_fallback: true,
+    roles: {
+      explore: ["route-b/claude"],
+      deep: ["missing/claude"],
+    },
+  },
+}
+
+it.instance(
+  "same-scope roles fall back to the anchor model when anchor_fallback is enabled",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      expect(yield* routing.resolve({ sessionID: root.id, role: "explore", model: a })).toMatchObject(a)
+      const text = yield* routing.command({ sessionID: root.id, action: "status", model: a })
+      expect(text).toContain("explore: route-a/claude (anchor fallback")
+      expect(yield* routing.resolve({ sessionID: root.id, role: "explore", model: b })).toMatchObject(a)
+      // Curated keeps the fail-closed contract even with anchor_fallback enabled.
+      yield* routing.command({ sessionID: root.id, action: "curated", model: a })
+      const result = yield* routing.resolve({ sessionID: root.id, role: "deep", model: a }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+    }),
+  { config: fallbackConfig },
+)
+
 it.instance(
   "resumed children do not migrate when the root scope narrows",
   () =>

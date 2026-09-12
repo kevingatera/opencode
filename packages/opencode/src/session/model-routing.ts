@@ -122,15 +122,24 @@ const layer = Layer.effect(
       const candidates = state.roles[input.role]?.map(Provider.parseModel) ?? [
         !session.parentID && !input.auxiliary ? input.model : state.anchor,
       ]
-      const selected = candidates.find(
-        (candidate) =>
-          (state.scope !== "same" || candidate.providerID === state.anchor.providerID) &&
-          (!pin || candidate.providerID === pin) &&
-          !cfg.disabled_providers?.includes(candidate.providerID) &&
-          (!cfg.enabled_providers || cfg.enabled_providers.includes(candidate.providerID)) &&
-          available[candidate.providerID]?.models[candidate.modelID],
-      )
-      return { selected, candidates, pin }
+      const permitted = (candidate: Model) =>
+        (state.scope !== "same" || candidate.providerID === state.anchor.providerID) &&
+        (!pin || candidate.providerID === pin) &&
+        !cfg.disabled_providers?.includes(candidate.providerID) &&
+        (!cfg.enabled_providers || cfg.enabled_providers.includes(candidate.providerID)) &&
+        Boolean(available[candidate.providerID]?.models[candidate.modelID])
+      const selected = candidates.find(permitted)
+      // In same scope the anchor model always satisfies the provider contract,
+      // so a configured role whose candidates all sit on other providers can
+      // fall back to it when the config opts in. Curated stays fail-closed.
+      const anchorFallback =
+        !selected &&
+        state.scope === "same" &&
+        state.anchor_fallback === true &&
+        Boolean(state.roles[input.role]) &&
+        (!pin || pin === state.anchor.providerID) &&
+        permitted(state.anchor)
+      return { selected: selected ?? (anchorFallback ? state.anchor : undefined), candidates, pin, anchorFallback: !selected && anchorFallback }
     })
 
     const resolve = Effect.fn("ModelRouting.resolve")(function* (input: Input) {
@@ -201,7 +210,7 @@ const layer = Layer.effect(
               auxiliary: ["title", "summary", "compaction"].includes(role),
             },
           )
-          return `${role}: ${result.selected ? `${result.selected.providerID}/${result.selected.modelID}` : "unavailable"}; candidates (in order): ${result.candidates.map((candidate) => `${candidate.providerID}/${candidate.modelID}`).join(" -> ") || "none"}${result.pin ? `; child provider: ${result.pin}` : ""}`
+          return `${role}: ${result.selected ? `${result.selected.providerID}/${result.selected.modelID}${result.anchorFallback ? " (anchor fallback: no configured candidate matches the anchor provider in same scope)" : ""}` : "unavailable"}; candidates (in order): ${result.candidates.map((candidate) => `${candidate.providerID}/${candidate.modelID}`).join(" -> ") || "none"}${result.pin ? `; child provider: ${result.pin}` : ""}`
         }),
       )
       return [
@@ -210,7 +219,7 @@ const layer = Layer.effect(
         `Provider anchor: ${loaded.state.anchor.providerID}`,
         ...roles,
         `Unconfigured child and auxiliary roles: ${loaded.state.anchor.providerID}/${loaded.state.anchor.modelID} (subject to availability and child provider pin)`,
-        "Role candidates are snapshotted when this root opts in. Configured roles always use their candidate lists.",
+        "Role candidates are snapshotted when this root opts in. Configured roles always use their candidate lists; with anchor_fallback enabled, a same-scope role with no matching candidate runs the anchor model instead of failing (shown as anchor fallback above).",
         "For unconfigured root roles, /models selects the main model: same allows the anchor provider; curated also allows explicit choices from other permitted available providers.",
         "The provider anchor stays fixed when /models changes, so switching back to same restores the original provider restriction.",
         "Applies to this root and nested children. Resumed children retain their provider; incompatible routes fail without fallback.",
