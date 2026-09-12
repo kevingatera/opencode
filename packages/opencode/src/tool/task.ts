@@ -20,6 +20,7 @@ import { Effect, Exit, Schema, Scope } from "effect"
 import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
+import { ModelRouting } from "@/session/model-routing"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -192,6 +193,7 @@ export const TaskTool = Tool.define(
     const scope = yield* Scope.Scope
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
+    const routing = yield* ModelRouting.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -337,10 +339,18 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = {
-        modelID: next.model?.modelID ?? msg.info.modelID,
-        providerID: next.model?.providerID ?? msg.info.providerID,
-      }
+      const model = yield* routing.resolve({
+        sessionID: nextSession.id,
+        role: next.name,
+        model: {
+          modelID: next.model?.modelID ?? msg.info.modelID,
+          providerID: next.model?.providerID ?? msg.info.providerID,
+        },
+      })
+      const taskVariant =
+        next.model || model.providerID !== msg.info.providerID || model.modelID !== msg.info.modelID
+          ? undefined
+          : variant
       const resumed = !!session
       const metadata: TaskMetadata = {
         parentSessionId: ctx.sessionID,
@@ -351,11 +361,7 @@ export const TaskTool = Tool.define(
         ...(resumed ? { resumed: true } : {}),
         ...(runInBackground ? { background: true } : {}),
       }
-      const taskOutput = (args: {
-        state: "running" | "completed" | "error"
-        summary?: string
-        text: string
-      }) =>
+      const taskOutput = (args: { state: "running" | "completed" | "error"; summary?: string; text: string }) =>
         renderTaskOutput({
           sessionID: nextSession.id,
           state: args.state,
@@ -390,7 +396,7 @@ export const TaskTool = Tool.define(
             modelID: model.modelID,
             providerID: model.providerID,
           },
-          variant: next.model ? undefined : variant,
+          variant: taskVariant,
           agent: next.name,
           parts,
         })

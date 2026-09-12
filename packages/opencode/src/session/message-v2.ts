@@ -119,7 +119,14 @@ function malformedTextualToolMarkupIndex(text: string) {
 
 function pendingTextualToolMarkupIndex(text: string) {
   const lower = text.toLowerCase()
-  const tags = ["<function_calls>", "</function_calls>", "<invoke name=", "</invoke>", "<parameter name=", "</parameter>"]
+  const tags = [
+    "<function_calls>",
+    "</function_calls>",
+    "<invoke name=",
+    "</invoke>",
+    "<parameter name=",
+    "</parameter>",
+  ]
   const matches = tags
     .flatMap((tag) =>
       Array.from({ length: Math.min(tag.length - 1, text.length) }, (_, index) => index + 1)
@@ -280,6 +287,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
   }
 
   for (const msg of input) {
+    if (isControl(msg)) continue
     if (msg.parts.length === 0) continue
 
     if (msg.info.role === "user") {
@@ -625,11 +633,23 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
   }
 })
 
+export const RoutingControl = "opencode.control.routing"
+
+// Message-level markers survive interruption before the separate part write.
+// Keep recognizing part markers on controls persisted before these markers existed.
+export function isControl(msg: WithParts) {
+  return (
+    (msg.info.role === "assistant" ? msg.info.mode === RoutingControl : msg.info.system === RoutingControl) ||
+    msg.parts.some((part) => part.type === "text" && part.metadata?.["opencode.control"] === "routing")
+  )
+}
+
 export function filterCompacted(msgs: Iterable<WithParts>) {
   const result = [] as WithParts[]
   const completed = new Set<string>()
   let retain: MessageID | undefined
   for (const msg of msgs) {
+    if (isControl(msg)) continue
     result.push(msg)
     if (retain) {
       if (msg.info.id === retain) break
@@ -689,6 +709,7 @@ export const filterCompactedEffect = Effect.fnUntraced(function* (sessionID: Ses
 // lexicographically monotonic. tasks are compaction/subtask parts attached to
 // user messages newer than the latest finished assistant.
 export function latest(msgs: WithParts[]) {
+  msgs = msgs.filter((msg) => !isControl(msg))
   let user: User | undefined
   let assistant: Assistant | undefined
   let finished: Assistant | undefined

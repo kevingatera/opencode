@@ -54,6 +54,7 @@ import { ModelV2 } from "@opencode-ai/core/model"
 import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
+import { ModelRouting } from "@/session/model-routing"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
@@ -428,6 +429,7 @@ export const node = LayerNode.make({
   service: Service,
   layer,
   deps: [
+    ModelRouting.node,
     Config.node,
     Plugin.node,
     Question.node,

@@ -625,6 +625,76 @@ describe("session.compaction.create", () => {
 
 describe("session.compaction.prune", () => {
   it.live(
+    "routing controls do not consume protected turns",
+    provideTmpdirInstance(
+      (dir) =>
+        Effect.gen(function* () {
+          const compact = yield* SessionCompaction.Service
+          const sessions = yield* SessionNs.Service
+          const chat = yield* sessions.create({})
+          const user = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            role: "user",
+            agent: "build",
+            model: ref,
+            time: { created: 1 },
+          })
+          const assistant = yield* sessions.updateMessage({
+            id: MessageID.ascending(),
+            sessionID: chat.id,
+            parentID: user.id,
+            role: "assistant",
+            mode: "build",
+            agent: "build",
+            path: { cwd: dir, root: dir },
+            cost: 0,
+            tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+            providerID: ref.providerID,
+            modelID: ref.modelID,
+            time: { created: 2 },
+            finish: "stop",
+          })
+          const part = yield* sessions.updatePart({
+            id: PartID.ascending(),
+            sessionID: chat.id,
+            messageID: assistant.id,
+            type: "tool",
+            tool: "bash",
+            callID: "large-output",
+            state: {
+              status: "completed",
+              input: {},
+              output: "x".repeat(200_000),
+              title: "output",
+              metadata: {},
+              time: { start: 2, end: 3 },
+            },
+          })
+          for (const created of [4, 5]) {
+            yield* sessions.updateMessage({
+              id: MessageID.ascending(),
+              sessionID: chat.id,
+              role: "user",
+              agent: "build",
+              model: ref,
+              system: MessageV2.RoutingControl,
+              time: { created },
+            })
+          }
+          yield* compact.prune({ sessionID: chat.id })
+          const stored = (yield* sessions.messages({ sessionID: chat.id }))
+            .flatMap((message) => message.parts)
+            .find((item) => item.id === part.id)
+          expect(
+            stored?.type === "tool" && stored.state.status === "completed" ? stored.state.time.compacted : "missing",
+          ).toBeUndefined()
+        }),
+      { config: { compaction: { prune: true } } },
+    ),
+  )
+
+  it.live(
     "compacts old completed tool output",
     provideTmpdirInstance(
       (dir) =>

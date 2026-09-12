@@ -2,6 +2,7 @@ import { LayerNode } from "@opencode-ai/core/effect/layer-node"
 import { SessionV1 } from "@opencode-ai/core/v1/session"
 import { ConfigV1 } from "@opencode-ai/core/v1/config/config"
 import { Session } from "./session"
+import { ModelRouting } from "./model-routing"
 import { SessionID, MessageID, PartID } from "./schema"
 import { Provider } from "@/provider/provider"
 import { MessageV2 } from "./message-v2"
@@ -194,6 +195,7 @@ const layer = Layer.effect(
     const config = yield* Config.Service
     const session = yield* Session.Service
     const agents = yield* Agent.Service
+    const routing = yield* ModelRouting.Service
     const plugin = yield* Plugin.Service
     const processors = yield* SessionProcessor.Service
     const provider = yield* Provider.Service
@@ -287,6 +289,7 @@ const layer = Layer.effect(
 
       loop: for (let msgIndex = msgs.length - 1; msgIndex >= 0; msgIndex--) {
         const msg = msgs[msgIndex]
+        if (MessageV2.isControl(msg)) continue
         if (msg.info.role === "user") turns++
         if (turns < 2) continue
         if (msg.info.role === "assistant" && msg.info.summary) break loop
@@ -323,6 +326,7 @@ const layer = Layer.effect(
       auto: boolean
       overflow?: boolean
     }) {
+      input = { ...input, messages: input.messages.filter((message) => !MessageV2.isControl(message)) }
       const parent = input.messages.findLast((m) => m.info.id === input.parentID)
       if (!parent || parent.info.role !== "user") {
         throw new Error(`Compaction parent must be a user message: ${input.parentID}`)
@@ -356,9 +360,13 @@ const layer = Layer.effect(
       }
 
       const agent = yield* agents.get("compaction")
-      const model = agent.model
-        ? yield* provider.getModel(agent.model.providerID, agent.model.modelID).pipe(Effect.orDie)
-        : yield* provider.getModel(userMessage.model.providerID, userMessage.model.modelID).pipe(Effect.orDie)
+      const routed = yield* routing.resolve({
+        sessionID: input.sessionID,
+        role: agent.name,
+        model: agent.model ?? userMessage.model,
+        auxiliary: true,
+      })
+      const model = yield* provider.getModel(routed.providerID, routed.modelID).pipe(Effect.orDie)
       const cfg = yield* config.get()
       const history = compactionPart && messages.at(-1)?.info.id === input.parentID ? messages.slice(0, -1) : messages
       const prior = completedCompactions(history)
@@ -594,6 +602,7 @@ export const node = LayerNode.make({
   service: Service,
   layer: layer,
   deps: [
+    ModelRouting.node,
     Config.node,
     Session.node,
     Agent.node,

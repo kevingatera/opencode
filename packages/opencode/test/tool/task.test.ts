@@ -24,6 +24,7 @@ import { disposeAllInstances } from "../fixture/fixture"
 import { testEffect } from "../lib/effect"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
+import { ModelRouting } from "@/session/model-routing"
 
 afterEach(async () => {
   await disposeAllInstances()
@@ -38,6 +39,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
   LayerNode.compile(
     LayerNode.group([
       Agent.node,
+      ModelRouting.node,
       BackgroundJob.node,
       EventV2Bridge.node,
       Config.node,
@@ -169,6 +171,106 @@ function reply(
 
 describe("tool.task", () => {
   it.instance(
+    "routing chooses role candidates at the task prompt boundary",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+        const result = yield* def.execute(
+          { description: "route task", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: {
+              promptOps: stubOps({
+                onPrompt: (input) => {
+                  seen = input
+                },
+              }),
+            },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+        expect(seen?.model).toEqual({ providerID: ref.providerID, modelID: ModelV2.ID.make("claude") })
+        expect(seen?.variant).toBeUndefined()
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "claude" })
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "same", roles: { general: ["other/gpt", "test/claude"] } },
+        agent: { general: { model: "other/gpt" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { claude: { name: "Claude", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "routing constrains task resumes before prompt admission",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const child = yield* sessions.create({
+          parentID: chat.id,
+          title: "Existing child",
+          agent: "general",
+          model: { providerID: ProviderV2.ID.make("other"), id: ModelV2.ID.make("claude") },
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+        const exit = yield* def
+          .execute(
+            { description: "resume safely", prompt: "continue", task_id: child.id },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: {
+                promptOps: stubOps({
+                  onPrompt: () => {
+                    calls++
+                  },
+                }),
+              },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("child pinned to other")
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "same", roles: { general: ["test/test-model", "other/claude"] } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
     "description sorts subagents by name and is stable across calls",
     () =>
       Effect.gen(function* () {
@@ -282,7 +384,9 @@ describe("tool.task", () => {
       expect(result.output).toContain(`task_id: ${child.id}`)
       expect(result.output).toContain("resumed: true")
       expect(result.output).toContain("actual_subagent_type: general")
-      expect(result.output).toContain(`resume_hint: To continue this same subagent later, call Task(task_id="${child.id}"`)
+      expect(result.output).toContain(
+        `resume_hint: To continue this same subagent later, call Task(task_id="${child.id}"`,
+      )
       expect(result.output).toContain(`<task id="${child.id}" state="completed">`)
       expect(seen?.sessionID).toBe(child.id)
       expect(seen?.variant).toBe("xhigh")

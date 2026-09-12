@@ -29,6 +29,7 @@ import * as OtelTracer from "@effect/opentelemetry/Tracer"
 import { LLMAISDK } from "./llm/ai-sdk"
 import { LLMNativeRuntime } from "./llm/native-runtime"
 import { LLMRequestPrep } from "./llm/request"
+import { ModelRouting } from "./model-routing"
 
 export const OUTPUT_TOKEN_MAX = ProviderTransform.OUTPUT_TOKEN_MAX
 
@@ -70,6 +71,7 @@ const live: Layer.Layer<
   | EventV2Bridge.Service
   | LLMClientService
   | RuntimeFlags.Service
+  | ModelRouting.Service
 > = Layer.effect(
   Service,
   Effect.gen(function* () {
@@ -81,8 +83,15 @@ const live: Layer.Layer<
     const events = yield* EventV2Bridge.Service
     const llmClient = yield* LLMClient.Service
     const flags = yield* RuntimeFlags.Service
+    const routing = yield* ModelRouting.Service
 
     const run = Effect.fn("LLM.run")(function* (input: StreamRequest) {
+      yield* routing.check({
+        sessionID: SessionID.make(input.sessionID),
+        role: input.agent.name,
+        model: { providerID: input.model.providerID, modelID: input.model.id },
+        auxiliary: input.small || input.agent.name === "compaction" || input.agent.name === "summary",
+      })
       yield* Effect.logInfo("stream", {
         providerID: input.model.providerID,
         modelID: input.model.id,
@@ -398,6 +407,7 @@ export const node = LayerNode.make({
     EventV2Bridge.node,
     llmClient,
     RuntimeFlags.node,
+    ModelRouting.node,
   ],
 })
 

@@ -46,6 +46,7 @@ import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Type
 import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, renderTaskOutput, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
+import { ModelRouting } from "./model-routing"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
@@ -138,6 +139,7 @@ const layer = Layer.effect(
     const summary = yield* SessionSummary.Service
     const sys = yield* SystemPrompt.Service
     const llm = yield* LLM.Service
+    const routing = yield* ModelRouting.Service
     const events = yield* EventV2Bridge.Service
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
@@ -201,7 +203,7 @@ const layer = Layer.effect(
       if (!Session.isDefaultTitle(input.session.title)) return
 
       const real = (m: SessionV1.WithParts) =>
-        m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
+        !MessageV2.isControl(m) && m.info.role === "user" && !m.parts.every((p) => "synthetic" in p && p.synthetic)
       const idx = input.history.findIndex(real)
       if (idx === -1) return
       if (input.history.filter(real).length !== 1) return
@@ -216,10 +218,18 @@ const layer = Layer.effect(
 
       const ag = yield* agents.get("title")
       if (!ag) return
-      const mdl = ag.model
-        ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
-        : ((yield* provider.getSmallModel(input.providerID)) ??
-          (yield* provider.getModel(input.providerID, input.modelID)))
+      const routed = yield* routing.resolve({
+        sessionID: input.session.id,
+        role: ag.name,
+        model: { providerID: input.providerID, modelID: input.modelID },
+        auxiliary: true,
+      })
+      const mdl = routed.routed
+        ? yield* provider.getModel(routed.providerID, routed.modelID)
+        : ag.model
+          ? yield* provider.getModel(ag.model.providerID, ag.model.modelID)
+          : ((yield* provider.getSmallModel(input.providerID)) ??
+            (yield* provider.getModel(input.providerID, input.modelID)))
       const msgs = onlySubtasks
         ? [{ role: "user" as const, content: subtasks.map((p) => p.prompt).join("\n") }]
         : yield* MessageV2.toModelMessagesEffect(context, mdl)
@@ -627,7 +637,7 @@ const layer = Layer.effect(
         }
       }
       const match = yield* sessions
-        .findMessage(sessionID, (m) => m.info.role === "user" && !!m.info.model)
+        .findMessage(sessionID, (m) => !MessageV2.isControl(m) && m.info.role === "user" && !!m.info.model)
         .pipe(Effect.orDie)
       if (Option.isSome(match) && match.value.info.role === "user") return match.value.info.model
       return yield* provider.defaultModel().pipe(Effect.orDie)
@@ -652,7 +662,11 @@ const layer = Layer.effect(
         throw error
       }
 
-      const model = input.model ?? ag.model ?? (yield* currentModel(input.sessionID))
+      const model = yield* routing.resolve({
+        sessionID: input.sessionID,
+        role: ag.name,
+        model: input.model ?? ag.model ?? (yield* currentModel(input.sessionID)),
+      })
       const same = ag.model && model.providerID === ag.model.providerID && model.modelID === ag.model.modelID
       const full =
         !input.variant && ag.variant && same
@@ -1082,19 +1096,21 @@ const layer = Layer.effect(
     })
 
     const lastAssistant = Effect.fnUntraced(function* (sessionID: SessionID) {
-      const match = yield* sessions.findMessage(sessionID, (m) => m.info.role !== "user").pipe(Effect.orDie)
+      const match = yield* sessions
+        .findMessage(sessionID, (m) => !MessageV2.isControl(m) && m.info.role !== "user")
+        .pipe(Effect.orDie)
       if (Option.isSome(match)) return match.value
       const msgs = yield* sessions.messages({ sessionID, limit: 1 }).pipe(Effect.orDie)
       if (msgs.length > 0) return msgs[0]
       throw new Error("Impossible")
     })
 
-
     const childTaskResult = (msgs: SessionV1.WithParts[], startedAt: number) => {
       // Chronological last message, not ID order — post-wrap MessageIDs sort before older ones.
-      const last = msgs.toSorted(
-        (a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id),
-      ).at(-1)
+      const last = msgs
+        .filter((msg) => !MessageV2.isControl(msg))
+        .toSorted((a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id))
+        .at(-1)
       if (!last || last.info.role !== "assistant") return
       if (!last.info.finish || last.info.finish === "tool-calls") return
       const finishedAt = last.info.time.completed ?? last.info.time.created
@@ -1112,7 +1128,8 @@ const layer = Layer.effect(
     }
 
     let wakeRecoveredSession: (sessionID: SessionID) => Effect.Effect<void> = () => Effect.void
-    let recoverParentForChild: (parentID: SessionID, childSessionID: SessionID) => Effect.Effect<void> = () => Effect.void
+    let recoverParentForChild: (parentID: SessionID, childSessionID: SessionID) => Effect.Effect<void> = () =>
+      Effect.void
 
     const recoverStaleTasks = Effect.fn("SessionPrompt.recoverStaleTasks")(function* (
       sessionID: SessionID,
@@ -1134,8 +1151,7 @@ const layer = Layer.effect(
           const text = childTaskResult(childMsgs, part.state.time.start)
           if (!text) continue
 
-          const description =
-            typeof part.state.input?.description === "string" ? part.state.input.description : "task"
+          const description = typeof part.state.input?.description === "string" ? part.state.input.description : "task"
           const output = renderTaskOutput({
             sessionID: childSessionID,
             state: "completed",
@@ -1236,7 +1252,8 @@ const layer = Layer.effect(
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const model = yield* getModel(lastUser.model.providerID, lastUser.model.modelID, sessionID)
+          const routed = yield* routing.resolve({ sessionID, role: lastUser.agent, model: lastUser.model })
+          const model = yield* getModel(routed.providerID, routed.modelID, sessionID)
           const task = tasks.pop()
 
           if (task?.type === "subtask") {
@@ -1438,9 +1455,7 @@ const layer = Layer.effect(
       },
     )
 
-    loop = Effect.fn("SessionPrompt.loop")(function* (
-      input: LoopInput,
-    ) {
+    loop = Effect.fn("SessionPrompt.loop")(function* (input: LoopInput) {
       return yield* state.ensureRunning(input.sessionID, lastAssistant(input.sessionID), runLoop(input.sessionID))
     })
 
@@ -1454,8 +1469,6 @@ const layer = Layer.effect(
     recoverParentForChild = (parentID, childSessionID) =>
       recoverStaleTasks(parentID, { wake: true, childSessionID }).pipe(Effect.orDie, Effect.asVoid)
 
-
-
     const shell: (input: ShellInput) => Effect.Effect<SessionV1.WithParts, Session.BusyError> = Effect.fn(
       "SessionPrompt.shell",
     )(function* (input: ShellInput) {
@@ -1464,6 +1477,74 @@ const layer = Layer.effect(
     })
 
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      if (input.command === "routing") {
+        // Reuse exclusive runner admission; normal loops queue behind the control,
+        // and only the runner that owns this work may publish its idle transition.
+        return yield* state
+          .startShell(
+            input.sessionID,
+            lastAssistant(input.sessionID),
+            Effect.gen(function* () {
+              const model = input.model ? Provider.parseModel(input.model) : yield* currentModel(input.sessionID)
+              const text = yield* routing.command({ sessionID: input.sessionID, action: input.arguments, model })
+              const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+              const ctx = yield* InstanceState.context
+              const agent = session.agent ?? input.agent ?? (yield* agents.defaultInfo()).name
+              const user = yield* sessions.updateMessage({
+                id: input.messageID ?? MessageID.ascending(),
+                sessionID: input.sessionID,
+                role: "user",
+                agent,
+                model,
+                system: MessageV2.RoutingControl,
+                time: { created: Date.now() },
+              })
+              yield* sessions.updatePart({
+                id: PartID.ascending(),
+                sessionID: input.sessionID,
+                messageID: user.id,
+                type: "text",
+                text: `/routing ${input.arguments.trim() || "status"}`,
+                synthetic: true,
+                metadata: { "opencode.control": "routing" },
+              })
+              const info: SessionV1.Assistant = {
+                id: MessageID.ascending(),
+                sessionID: input.sessionID,
+                parentID: user.id,
+                role: "assistant",
+                agent,
+                mode: MessageV2.RoutingControl,
+                modelID: model.modelID,
+                providerID: model.providerID,
+                path: { cwd: ctx.directory, root: ctx.worktree },
+                cost: 0,
+                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+                time: { created: Date.now(), completed: Date.now() },
+                finish: "stop",
+              }
+              yield* sessions.updateMessage(info)
+              const part = yield* sessions.updatePart({
+                id: PartID.ascending(),
+                sessionID: input.sessionID,
+                messageID: info.id,
+                type: "text",
+                text,
+                synthetic: true,
+                metadata: { "opencode.control": "routing" },
+                time: { start: Date.now(), end: Date.now() },
+              })
+              yield* events.publish(Command.Event.Executed, {
+                name: input.command,
+                sessionID: input.sessionID,
+                arguments: input.arguments,
+                messageID: info.id,
+              })
+              return { info, parts: [part] }
+            }),
+          )
+          .pipe(Effect.orDie)
+      }
       yield* Effect.logInfo("command", {
         "session.id": input.sessionID,
         command: input.command,
@@ -1518,7 +1599,7 @@ const layer = Layer.effect(
       }
       template = template.trim()
 
-      const taskModel = yield* Effect.gen(function* () {
+      const requestedModel = yield* Effect.gen(function* () {
         if (cmd.model) return Provider.parseModel(cmd.model)
         if (cmd.agent) {
           const cmdAgent = yield* agents.get(cmd.agent)
@@ -1528,8 +1609,6 @@ const layer = Layer.effect(
         return yield* currentModel(input.sessionID)
       })
 
-      yield* getModel(taskModel.providerID, taskModel.modelID, input.sessionID)
-
       const agent = agentName ? yield* agents.get(agentName) : yield* agents.defaultInfo()
       if (!agent) {
         const available = (yield* agents.list()).filter((a) => !a.hidden).map((a) => a.name)
@@ -1538,6 +1617,15 @@ const layer = Layer.effect(
         yield* events.publish(Session.Event.Error, { sessionID: input.sessionID, error: error.toObject() })
         throw error
       }
+
+      const taskModel = yield* routing.resolve({
+        sessionID: input.sessionID,
+        role: agent.name,
+        model: requestedModel,
+        // Subtask selection is a preview. The child owns its provider pin at Task admission.
+        auxiliary: (agent.mode === "subagent" && cmd.subtask !== false) || cmd.subtask === true,
+      })
+      yield* getModel(taskModel.providerID, taskModel.modelID, input.sessionID)
 
       const templateParts = yield* resolvePromptParts(template)
       const inputFiles = new Set(
@@ -1733,6 +1821,7 @@ export const node = LayerNode.make({
     SessionSummary.node,
     SystemPrompt.node,
     LLM.node,
+    ModelRouting.node,
     EventV2Bridge.node,
     RuntimeFlags.node,
     Database.node,

@@ -151,6 +151,14 @@ const layer = Layer.effect(
         }
       }
 
+      commands.routing = {
+        name: "routing",
+        description: "legacy model routing [same|curated|status] (not V2)",
+        source: "command",
+        template: "",
+        hints: ["same|curated|status"],
+      }
+
       return {
         commands,
       }

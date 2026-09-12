@@ -303,6 +303,335 @@ function providerCfg(url: string) {
   }
 }
 
+it.instance("routing command changes scope without a model call or shell interpolation", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      model_routing: { scope: "same", roles: { build: ["test/test-model"] } },
+      command: { routing: { template: "!`exit 77`" } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const result = yield* prompt.command({
+      sessionID: chat.id,
+      command: "routing",
+      arguments: "curated",
+      model: "test/test-model",
+    })
+    expect(result.parts).toContainEqual(
+      expect.objectContaining({
+        type: "text",
+        text: expect.stringContaining("Legacy model routing: curated"),
+        time: { start: expect.any(Number), end: expect.any(Number) },
+      }),
+    )
+    expect(yield* llm.calls).toBe(0)
+    expect((yield* sessions.messages({ sessionID: chat.id })).map((item) => item.info.role)).toEqual([
+      "user",
+      "assistant",
+    ])
+    const invalid = yield* prompt.command({
+      sessionID: chat.id,
+      command: "routing",
+      arguments: "!`exit 77`",
+      model: "test/test-model",
+    })
+    expect(invalid.parts).toContainEqual(
+      expect.objectContaining({ type: "text", text: expect.stringContaining("Usage: /routing") }),
+    )
+    expect(yield* llm.calls).toBe(0)
+  }),
+)
+
+for (const role of ["user", "assistant"] as const) {
+  it.instance(`routing control survives interruption after ${role} persistence before its part`, () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        model_routing: { scope: "same", roles: { general: ["test/test-model"] } },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: ref.providerID, id: ref.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, agent: "general" })
+      const ready = yield* Deferred.make<void>()
+      const off = yield* events.listen((event) => {
+        if (event.type !== MessageV2.Event.Updated.type) return Effect.void
+        const data = event.data as typeof MessageV2.Event.Updated.data.Type
+        if (data.info.sessionID !== child.id || data.info.role !== role) return Effect.void
+        return Deferred.succeed(ready, undefined).pipe(Effect.andThen(Effect.never))
+      })
+      const fiber = yield* prompt
+        .command({ sessionID: child.id, command: "routing", arguments: "status", model: "other/untrusted" })
+        .pipe(Effect.forkChild)
+      yield* awaitWithTimeout(Deferred.await(ready), "control message not persisted")
+      yield* Fiber.interrupt(fiber)
+      yield* off
+      const history = yield* sessions.messages({ sessionID: child.id })
+      const partial = history.find((message) => message.info.role === role)
+      expect(partial?.parts).toEqual([])
+      expect(history.every(MessageV2.isControl)).toBe(true)
+      expect(MessageV2.latest(history).user).toBeUndefined()
+      expect(MessageV2.latest(history).assistant).toBeUndefined()
+      const user = yield* prompt.prompt({
+        sessionID: child.id,
+        model: ref,
+        noReply: true,
+        parts: [{ type: "text", text: "Actual first turn" }],
+      })
+      expect(user.info).toMatchObject({ role: "user", model: ref })
+    }),
+  )
+}
+
+it.instance("routing serializes controls with normal runner admission and retains busy ownership", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      model_routing: { scope: "same", roles: { build: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const events = yield* EventV2Bridge.Service
+    const status = yield* SessionStatus.Service
+    const chat = yield* sessions.create({ title: "Pinned", model: { providerID: ref.providerID, id: ref.modelID } })
+    const ready = yield* Deferred.make<void>()
+    const release = yield* Deferred.make<void>()
+    const off = yield* events.listen((event) => {
+      if (event.type !== MessageV2.Event.Updated.type) return Effect.void
+      const data = event.data as typeof MessageV2.Event.Updated.data.Type
+      if (data.info.sessionID !== chat.id || data.info.role !== "user" || data.info.system !== MessageV2.RoutingControl)
+        return Effect.void
+      return Deferred.succeed(ready, undefined).pipe(Effect.andThen(Deferred.await(release)))
+    })
+    const control = yield* prompt
+      .command({ sessionID: chat.id, command: "routing", arguments: "status", model: "test/test-model" })
+      .pipe(Effect.forkChild)
+    yield* awaitWithTimeout(Deferred.await(ready), "control not suspended")
+    expect(yield* status.get(chat.id)).toEqual({ type: "busy" })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "Concurrent question" }],
+    })
+    const gate = yield* Deferred.make<void>()
+    yield* llm.push(reply().text("Answer").wait(deferredAsPromise(gate)).stop())
+    const normal = yield* prompt.loop({ sessionID: chat.id }).pipe(
+      Effect.forkChild,
+      Effect.tap(() => Effect.yieldNow),
+    )
+    expect(yield* llm.calls).toBe(0)
+    yield* Deferred.succeed(release, undefined)
+    yield* Fiber.join(control)
+    yield* llm.wait(1)
+    expect(yield* status.get(chat.id)).toEqual({ type: "busy" })
+    const rejected = yield* prompt
+      .command({ sessionID: chat.id, command: "routing", arguments: "status", model: "test/test-model" })
+      .pipe(Effect.exit)
+    expect(Exit.isFailure(rejected)).toBe(true)
+    expect(yield* status.get(chat.id)).toEqual({ type: "busy" })
+    yield* Deferred.succeed(gate, undefined)
+    yield* Fiber.join(normal)
+    yield* off
+    expect(yield* status.get(chat.id)).toEqual({ type: "idle" })
+  }),
+)
+
+it.instance("routing controls preserve pending prompts and stay out of provider history", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      model_routing: { scope: "same", roles: { build: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const events = yield* EventV2Bridge.Service
+    const chat = yield* sessions.create({ title: "Pinned" })
+    const user = yield* prompt.prompt({
+      sessionID: chat.id,
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "Pending question" }],
+    })
+    const seen: string[] = []
+    const off = yield* events.listen((event) => {
+      seen.push(event.type)
+      return Effect.void
+    })
+    yield* prompt.command({ sessionID: chat.id, command: "routing", arguments: "status", model: "other/untrusted" })
+    yield* off
+    expect(seen).toContain(SessionStatus.Event.Status.type)
+    expect(seen).toContain(SessionStatus.Event.Idle.type)
+    const history = yield* sessions.messages({ sessionID: chat.id })
+    expect(MessageV2.latest(history).user?.id).toBe(user.info.id)
+    const providers = yield* ProviderSvc.Service
+    const model = yield* providers.getModel(ref.providerID, ref.modelID)
+    expect(JSON.stringify(yield* MessageV2.toModelMessagesEffect(history, model))).not.toContain("/routing")
+    yield* llm.push(reply().text("Answered pending question").stop())
+    const result = yield* prompt.loop({ sessionID: chat.id })
+    expect(result.info).toMatchObject({ role: "assistant", parentID: user.info.id })
+    expect(yield* llm.calls).toBe(1)
+    expect(JSON.stringify((yield* llm.hits)[0]?.body)).not.toContain("Legacy model routing")
+  }),
+)
+
+it.instance("routing status before the first question does not suppress title generation", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      model_routing: { scope: "same", roles: { build: ["test/test-model"], title: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ model: { providerID: ref.providerID, id: ref.modelID } })
+    yield* prompt.command({ sessionID: chat.id, command: "routing", arguments: "status", model: "test/test-model" })
+    yield* llm.push(reply().text("Title").stop(), reply().text("Answer").stop())
+    yield* prompt.prompt({ sessionID: chat.id, model: ref, parts: [{ type: "text", text: "First question" }] })
+    yield* pollWithTimeout(
+      sessions
+        .get(chat.id)
+        .pipe(Effect.map((session) => (Session.isDefaultTitle(session.title) ? undefined : session.title))),
+      "title missing",
+    )
+    expect(yield* llm.calls).toBe(2)
+  }),
+)
+
+it.instance("routing status cannot pin an empty child using command model metadata", () =>
+  Effect.gen(function* () {
+    yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      model_routing: { scope: "same", roles: { general: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const root = yield* sessions.create({ title: "Root", model: { providerID: ref.providerID, id: ref.modelID } })
+    const child = yield* sessions.create({ parentID: root.id, agent: "general" })
+    yield* prompt.command({ sessionID: child.id, command: "routing", arguments: "status", model: "other/untrusted" })
+    const user = yield* prompt.prompt({
+      sessionID: child.id,
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "First question" }],
+    })
+    expect(user.info).toMatchObject({ role: "user", model: ref })
+  }),
+)
+
+for (const subtask of [false, true]) {
+  it.instance(`routing validates effective command model (subtask=${subtask})`, () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        model_routing: { scope: "same", roles: { build: ["test/test-model"], general: ["test/test-model"] } },
+        command: {
+          routed: { template: "Say hello", agent: subtask ? "general" : "build", subtask, model: "missing/model" },
+        },
+      }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Pinned",
+        model: { providerID: ref.providerID, id: ref.modelID },
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.push(reply().text("Command result").stop(), reply().text("Parent result").stop())
+      const result = yield* prompt.command({
+        sessionID: chat.id,
+        command: "routed",
+        arguments: "",
+        model: "test/test-model",
+      })
+      expect(result.info.role).toBe("assistant")
+      expect((yield* llm.hits).every((hit) => hit.body.model === "test-model")).toBe(true)
+      expect(yield* llm.calls).toBeGreaterThan(0)
+    }),
+  )
+}
+
+it.instance("routing selects the actual loop model rather than the prompt override", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      model_routing: { scope: "same", roles: { build: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ title: "Pinned", model: { providerID: ref.providerID, id: ref.modelID } })
+    yield* llm.push(reply().text("routed response").stop())
+    const result = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: { ...ref, modelID: ModelV2.ID.make("not-allowed") },
+      parts: [{ type: "text", text: "hello" }],
+    })
+    expect(result.info).toMatchObject({ role: "assistant", providerID: ref.providerID, modelID: ref.modelID })
+    expect((yield* llm.hits).map((hit) => hit.body.model)).toEqual(["test-model"])
+  }),
+)
+
+it.instance("routing applies to title generation instead of the configured small model", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      small_model: "missing/title-model",
+      model_routing: { scope: "same", roles: { build: ["test/test-model"], title: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const chat = yield* sessions.create({ model: { providerID: ref.providerID, id: ref.modelID } })
+    yield* llm.push(reply().text("Routed title").stop(), reply().text("Routed response").stop())
+    yield* prompt.prompt({ sessionID: chat.id, agent: "build", model: ref, parts: [{ type: "text", text: "hello" }] })
+    yield* pollWithTimeout(
+      sessions
+        .get(chat.id)
+        .pipe(Effect.map((session) => (Session.isDefaultTitle(session.title) ? undefined : session.title))),
+      "title was not generated",
+    )
+    expect((yield* llm.hits).map((hit) => hit.body.model)).toEqual(["test-model", "test-model"])
+  }),
+)
+
+it.instance("routing applies to the actual compaction provider call", () =>
+  Effect.gen(function* () {
+    const { llm } = yield* useServerConfig((url) => ({
+      ...providerCfg(url),
+      agent: { compaction: { model: "missing/compaction-model" } },
+      model_routing: { scope: "same", roles: { build: ["test/test-model"], compaction: ["test/test-model"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({ title: "Pinned", model: { providerID: ref.providerID, id: ref.modelID } })
+    const user = yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: ref,
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* prompt.command({ sessionID: chat.id, command: "routing", arguments: "status", model: "test/test-model" })
+    yield* llm.push(reply().text("Compacted summary").stop())
+    yield* compaction.process({
+      sessionID: chat.id,
+      parentID: user.info.id,
+      messages: yield* sessions.messages({ sessionID: chat.id }),
+      auto: false,
+    })
+    expect((yield* llm.hits).map((hit) => hit.body.model)).toEqual(["test-model"])
+    expect(JSON.stringify((yield* llm.hits)[0]?.body)).not.toContain("Legacy model routing")
+    expect((yield* sessions.messages({ sessionID: chat.id })).at(-1)?.info).toMatchObject({
+      role: "assistant",
+      summary: true,
+      providerID: ref.providerID,
+      modelID: ref.modelID,
+    })
+  }),
+)
+
 noLLMServer.instance("prompt without agent preserves the child session agent", () =>
   Effect.gen(function* () {
     const prompt = yield* SessionPrompt.Service
@@ -672,13 +1001,7 @@ it.instance("loop suppresses streamed textual tool protocol leaks", () =>
       parts: [{ type: "text", text: "hello" }],
     })
     yield* llm.push(
-      reply()
-        .text("Safe prefix.")
-        .text("Tool res")
-        .text("ult 3 todos:\n[]\n<function")
-        .text("_calls>")
-        .stop()
-        .item(),
+      reply().text("Safe prefix.").text("Tool res").text("ult 3 todos:\n[]\n<function").text("_calls>").stop().item(),
     )
 
     const result = yield* prompt.loop({ sessionID: chat.id })
@@ -1323,80 +1646,82 @@ it.instance("marks stale parent task complete on recovery without continuing par
   }),
 )
 
-it.instance("resuming a completed subagent waits for the new child turn instead of aborting", () =>
-  Effect.gen(function* () {
-    const { llm } = yield* useServerConfig(providerCfg)
-    const prompt = yield* SessionPrompt.Service
-    const sessions = yield* Session.Service
-    const chat = yield* sessions.create({
-      title: "Parent",
-      permission: [{ permission: "*", pattern: "*", action: "allow" }],
-    })
-    yield* llm.tool("task", {
-      description: "inspect files",
-      prompt: "report first-pass",
-      subagent_type: "general",
-    })
-    yield* llm.text("first-pass complete")
-    yield* user(chat.id, "delegate then continue")
+it.instance(
+  "resuming a completed subagent waits for the new child turn instead of aborting",
+  () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig(providerCfg)
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({
+        title: "Parent",
+        permission: [{ permission: "*", pattern: "*", action: "allow" }],
+      })
+      yield* llm.tool("task", {
+        description: "inspect files",
+        prompt: "report first-pass",
+        subagent_type: "general",
+      })
+      yield* llm.text("first-pass complete")
+      yield* user(chat.id, "delegate then continue")
 
-    const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
-    const spawned = yield* pollWithTimeout(
-      Effect.gen(function* () {
-        const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-        const tool = msgs
-          .flatMap((message) => message.parts)
-          .find(
-            (part): part is SessionV1.ToolPart =>
-              part.type === "tool" && part.tool === "task" && part.state.status === "completed",
+      const fiber = yield* prompt.loop({ sessionID: chat.id }).pipe(Effect.forkChild)
+      const spawned = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const tool = msgs
+            .flatMap((message) => message.parts)
+            .find(
+              (part): part is SessionV1.ToolPart =>
+                part.type === "tool" && part.tool === "task" && part.state.status === "completed",
+            )
+          if (tool?.state.status === "completed" && typeof tool.state.metadata?.sessionId === "string") return tool
+        }),
+        "spawned task did not complete",
+      )
+      if (spawned.state.status !== "completed") return
+
+      const childID = SessionID.make(String(spawned.state.metadata.sessionId))
+      const hold = defer<void>()
+      yield* llm.tool("task", {
+        description: "continue inspect",
+        prompt: "report second-pass",
+        task_id: childID,
+      })
+      yield* llm.hold("second-pass complete", hold.promise)
+      yield* llm.text("parent finished")
+
+      const resumed = yield* pollWithTimeout(
+        Effect.gen(function* () {
+          const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+          const tools = msgs.flatMap((message) =>
+            message.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task"),
           )
-        if (tool?.state.status === "completed" && typeof tool.state.metadata?.sessionId === "string") return tool
-      }),
-      "spawned task did not complete",
-    )
-    if (spawned.state.status !== "completed") return
+          const current = tools.at(-1)
+          if (tools.length >= 2 && current?.state.status === "running" && current.state.metadata?.resumed === true) {
+            return current
+          }
+        }),
+        "resumed task did not stay running",
+      )
+      if (resumed.state.status !== "running") return
+      expect(JSON.stringify(resumed.state.metadata)).not.toContain("Recovered task completed")
+      hold.resolve()
 
-    const childID = SessionID.make(String(spawned.state.metadata.sessionId))
-    const hold = defer<void>()
-    yield* llm.tool("task", {
-      description: "continue inspect",
-      prompt: "report second-pass",
-      task_id: childID,
-    })
-    yield* llm.hold("second-pass complete", hold.promise)
-    yield* llm.text("parent finished")
-
-    const resumed = yield* pollWithTimeout(
-      Effect.gen(function* () {
-        const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-        const tools = msgs.flatMap((message) =>
-          message.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task"),
-        )
-        const current = tools.at(-1)
-        if (tools.length >= 2 && current?.state.status === "running" && current.state.metadata?.resumed === true) {
-          return current
-        }
-      }),
-      "resumed task did not stay running",
-    )
-    if (resumed.state.status !== "running") return
-    expect(JSON.stringify(resumed.state.metadata)).not.toContain("Recovered task completed")
-    hold.resolve()
-
-    yield* Fiber.join(fiber)
-    const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
-    const tasks = msgs.flatMap((message) =>
-      message.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task"),
-    )
-    expect(tasks).toHaveLength(2)
-    expect(tasks.map((part) => part.state.status)).toEqual(["completed", "completed"])
-    const second = tasks[1]
-    if (!second || second.state.status !== "completed") return
-    expect(second.state.metadata?.sessionId).toBe(childID)
-    expect(second.state.metadata?.subagentType).toBe("general")
-    expect(second.state.output).toContain("second-pass complete")
-    expect(second.state.output).not.toContain("Recovered task completed")
-  }),
+      yield* Fiber.join(fiber)
+      const msgs = yield* MessageV2.filterCompactedEffect(chat.id)
+      const tasks = msgs.flatMap((message) =>
+        message.parts.filter((part): part is SessionV1.ToolPart => part.type === "tool" && part.tool === "task"),
+      )
+      expect(tasks).toHaveLength(2)
+      expect(tasks.map((part) => part.state.status)).toEqual(["completed", "completed"])
+      const second = tasks[1]
+      if (!second || second.state.status !== "completed") return
+      expect(second.state.metadata?.sessionId).toBe(childID)
+      expect(second.state.metadata?.subagentType).toBe("general")
+      expect(second.state.output).toContain("second-pass complete")
+      expect(second.state.output).not.toContain("Recovered task completed")
+    }),
   20_000,
 )
 

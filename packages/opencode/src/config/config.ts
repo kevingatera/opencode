@@ -34,6 +34,7 @@ import { ConfigPaths } from "./paths"
 import { ConfigPlugin } from "./plugin"
 import { ConfigVariable } from "./variable"
 import { ConfigV2Compat } from "./v2-compat"
+import { ConfigModelRouting } from "./model-routing"
 import { Npm } from "@opencode-ai/core/npm"
 import { withTransientReadRetry } from "@/util/effect-http-client"
 
@@ -109,7 +110,13 @@ async function resolveLoadedPlugins<T extends { plugin?: ConfigPluginV1.Spec[] }
   return config
 }
 
-type Info = ConfigV1.Info & {
+export const Info = Schema.Struct({
+  ...ConfigV1.Info.fields,
+  model_routing: Schema.optional(ConfigModelRouting.Info),
+})
+
+export type Info = ConfigV1.Info & {
+  model_routing?: ConfigModelRouting.Info
   // plugin_origins is derived state, not a persisted config field. It keeps each winning plugin spec together
   // with the file and scope it came from so later runtime code can make location-sensitive decisions.
   plugin_origins?: ConfigPlugin.Origin[]
@@ -195,7 +202,7 @@ const layer = Layer.effect(
           action: diagnostic.message,
         }),
       )
-      return ConfigParse.schema(ConfigV1.Info, result.value, source)
+      return ConfigParse.schema(Info, result.value, source)
     })
 
     const fetchRemoteJson = Effect.fnUntraced(function* <S extends Schema.Top>(
@@ -662,7 +669,7 @@ const layer = Layer.effect(
       let changed: boolean
       if (!file.endsWith(".jsonc")) {
         const existing = ConfigParse.jsonc(before, file)
-        ConfigParse.schema(ConfigV1.Info, ConfigV2Compat.lower(normalizeLoadedConfig(existing), file).value, file)
+        ConfigParse.schema(Info, ConfigV2Compat.lower(normalizeLoadedConfig(existing), file).value, file)
         const merged = mergeDeep(isRecord(existing) ? existing : {}, patch)
         const serialized = JSON.stringify(merged, null, 2)
         next = yield* decodeConfig(merged, file)
