@@ -18,15 +18,18 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 ## Objective
 - [one or two brief sentences describing what the user is trying to accomplish]
 
+## Standing User Directives
+- [persistent user constraints, preferences, or scope limits that affect how the agent works, quoted verbatim; or "(none)"]
+
 ## Important Details
-- [constraints/preferences, decisions and why, important facts/assumptions, exact context needed to continue, or "(none)"]
+- [decisions and why, hard-won findings stated as conclusions with one-line evidence, adjudicated flakes or failures with their verdict, important facts/assumptions, exact context needed to continue, or "(none)"]
 
 ## Work State
 ### Completed
-- [finished work, verified facts, or changes made; otherwise "(none)"]
+- [finished work, verified facts, or changes made; for significant commands include the command and its outcome (pass/fail counts, error or success); otherwise "(none)"]
 
 ### Active
-- [current work, partial changes, or investigation state; otherwise "(none)"]
+- [current work, partial changes, the exact in-flight edit if any, in-flight commands, or long-running processes; otherwise "(none)"]
 
 ### Blocked
 - [blockers, failing commands, or unknowns; otherwise "(none)"]
@@ -36,18 +39,33 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 2. [next action if known, or "(none)"]
 
 ## Relevant Files
-- [file or directory path: why it matters, or "(none)"]
+- [file or directory path: what changed in it, or what was learned from reading it, and why it matters; or "(none)"]
+
+## Subagents
+- [<agent or task description>: task/session ID (ses_...) verbatim if known, status (completed/pending/failed), whether resuming it would help, and any pending external state (authorizations, approvals, loaded skills); otherwise "(none)"]
 </template>
 
 Rules:
 - Keep every section, even when empty.
 - Use terse bullets, not prose paragraphs.
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
+- Never invent details: do not state file contents, counts, dates, or results that are not in the conversation. If a detail is uncertain or missing, omit it rather than reconstructing it.
+- Describe file contents only when the conversation actually shows them in a tool result; for files that were never displayed, record only the path and why it matters.
+- Quote user directives verbatim in "Standing User Directives"; never paraphrase them.
+- Record the outcome next to each significant command - a command without its recorded result will be re-run.
+- The end of the conversation is the most recent and most important state: describe the final stretch of work in the most detail.
+- Under "Relevant Files", list every file the conversation created, modified, or deleted, with its change state, plus any files needed for the next step.
+- Preserve subagent task/session IDs (ses_...) verbatim so the next agent can resume those subagents.
+- Record the state of uncommitted work: which files were modified, and whether changes are staged, unstaged, or committed (include the commit hash when known).
 - Do not mention the summary process or that context was compacted.`
 const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
 
 When combining:
 - Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- Carry forward file change states (modified/staged/committed) and verification results until the <conversation> shows they changed.
+- Carry forward subagent task/session IDs and their status until the subagent is finished or no longer resumable.
+- Carry "Standing User Directives" forward verbatim; drop a directive only when the user explicitly reverses it.
+- Carry forward adjudicated findings and flake verdicts; do not re-litigate them.
 - The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
 - Add new progress, decisions, constraints, and context from the conversation.
 - Move completed work from "Active" to "Completed".

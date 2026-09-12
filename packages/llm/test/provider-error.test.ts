@@ -13,6 +13,9 @@ describe("provider error classification", () => {
       "Prompt has 5,958,968 tokens, but the configured context size is 256,000 tokens",
       "Too many tokens",
       "Token limit exceeded",
+      "Prompt exceeds max length",
+      "Prompt exceeds maximum length",
+      "Input exceeds max length",
     ]
 
     expect(messages.every(isContextOverflow)).toBe(true)

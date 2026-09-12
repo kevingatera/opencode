@@ -2672,6 +2672,42 @@ unix(
   30_000,
 )
 
+unix(
+  "command ! expansion truncates oversized shell output",
+  () =>
+    withSh(() =>
+      Effect.gen(function* () {
+        const { llm } = yield* useServerConfig((url) => ({
+          ...providerCfg(url),
+          command: {
+            probe: {
+              template: "!`yes x | head -c 60000`",
+            },
+          },
+        }))
+
+        const { prompt, chat } = yield* boot()
+        yield* llm.text("done")
+
+        yield* prompt.command({
+          sessionID: chat.id,
+          command: "probe",
+          arguments: "",
+        })
+
+        const inputs = yield* llm.inputs
+        const messages = (inputs.at(-1)?.messages ?? []) as Array<{ role?: string; content?: unknown }>
+        const userText = messages
+          .filter((message) => message.role === "user")
+          .map((message) => (typeof message.content === "string" ? message.content : JSON.stringify(message.content)))
+          .join("\n")
+        expect(userText).toContain("[command output truncated:")
+        expect(userText.length).toBeLessThan(55_000)
+      }),
+    ),
+  30_000,
+)
+
 unixNoLLMServer(
   "cancel interrupts shell and resolves cleanly",
   () =>

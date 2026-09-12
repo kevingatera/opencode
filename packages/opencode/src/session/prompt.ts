@@ -72,6 +72,18 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/webp",
 ])
 
+// Command templates interpolate `!`...`` output straight into the prompt. A large
+// working tree can make that output megabytes long, blowing the model's context
+// before the agent ever sees it, so cap each substitution and tell the model the
+// output was trimmed.
+const COMMAND_SHELL_OUTPUT_MAX = 50_000
+
+function capShellOutput(value: string) {
+  if (value.length <= COMMAND_SHELL_OUTPUT_MAX) return value
+  const half = Math.floor(COMMAND_SHELL_OUTPUT_MAX / 2)
+  return `${value.slice(0, half)}\n[command output truncated: ${value.length - half * 2} of ${value.length} characters omitted - run the command directly for the full output]\n${value.slice(-half)}`
+}
+
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
 IMPORTANT:
@@ -1595,7 +1607,7 @@ const layer = Layer.effect(
           ),
         )
         let index = 0
-        template = template.replace(bashRegex, () => results[index++])
+        template = template.replace(bashRegex, () => capShellOutput(results[index++]))
       }
       template = template.trim()
 

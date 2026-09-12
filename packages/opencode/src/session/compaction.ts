@@ -28,10 +28,14 @@ export const Event = SessionCompactionEvent
 
 export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
-const TOOL_OUTPUT_MAX_CHARS = 2_000
+const TOOL_OUTPUT_MIN_CHARS = 2_000
+const TOOL_OUTPUT_MAX_CHARS = 12_000
 const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
-const MAX_PRESERVE_RECENT_TOKENS = 15_000
+// Recent work is the most likely to be referenced next; the old 15k cap squeezed the
+// final stretch of long sessions into the summarizer, where dropped details are lost
+// entirely (they are in neither the verbatim tail nor the summary).
+const MAX_PRESERVE_RECENT_TOKENS = 40_000
 type Turn = {
   start: number
   end: number
@@ -49,10 +53,20 @@ type CompletedCompaction = {
   summary: string | undefined
 }
 
-const truncate = (value: string) =>
-  value.length <= TOOL_OUTPUT_MAX_CHARS ? value : `${value.slice(0, TOOL_OUTPUT_MAX_CHARS)}\n[truncated]`
+// Keep the head and tail of oversized tool outputs, not just the head: paths and
+// headers live at the start, but error messages and stack traces live at the end.
+const truncate = (value: string, max: number) => {
+  if (value.length <= max) return value
+  const half = Math.floor((max - 64) / 2)
+  return `${value.slice(0, half)}\n[${value.length - half * 2} chars truncated]\n${value.slice(-half)}`
+}
 
-const serialize = (message: SessionV1.WithParts) => {
+// Scale the per-tool-output budget to the summarizer model's context so large-context
+// models see more of each tool result instead of a fixed 2KB slice.
+const toolOutputBudget = (input: { cfg: ConfigV1.Info; model: Provider.Model }) =>
+  Math.min(TOOL_OUTPUT_MAX_CHARS, Math.max(TOOL_OUTPUT_MIN_CHARS, Math.floor(usable(input) * 0.1)))
+
+const serialize = (message: SessionV1.WithParts, toolBudget: number) => {
   if (message.info.role === "user") {
     const text = message.parts
       .filter((part): part is SessionV1.TextPart => part.type === "text" && !part.ignored)
@@ -62,7 +76,10 @@ const serialize = (message: SessionV1.WithParts) => {
     const files = message.parts.flatMap((part) =>
       part.type === "file" ? [`[Attached ${part.mime}: ${part.filename ?? "file"}]`] : [],
     )
-    return [...(text ? [`[User]: ${text}`] : []), ...files].join("\n")
+    const subtasks = message.parts.flatMap((part) =>
+      part.type === "subtask" ? [`[Subagent task launched]: agent=${part.agent}: ${part.description}`] : [],
+    )
+    return [...(text ? [`[User]: ${text}`] : []), ...files, ...subtasks].join("\n")
   }
   return message.parts
     .flatMap((part) => {
@@ -76,10 +93,10 @@ const serialize = (message: SessionV1.WithParts) => {
         )
         const output = part.state.time.compacted
           ? "[Old tool result content cleared]"
-          : truncate([part.state.output, ...attachments].join("\n"))
+          : truncate([part.state.output, ...attachments].join("\n"), toolBudget)
         return [call, `[Tool result]: ${output}`]
       }
-      if (part.state.status === "error") return [call, `[Tool error]: ${part.state.error}`]
+      if (part.state.status === "error") return [call, `[Tool error]: ${truncate(part.state.error, toolBudget)}`]
       return [call]
     })
     .join("\n")
@@ -385,7 +402,8 @@ const layer = Layer.effect(
       )
       const msgs = structuredClone(selected.head)
       yield* plugin.trigger("experimental.chat.messages.transform", {}, { messages: msgs })
-      const conversation = msgs.map(serialize).filter(Boolean).join("\n\n")
+      const toolBudget = toolOutputBudget({ cfg, model })
+      const conversation = msgs.map((msg) => serialize(msg, toolBudget)).filter(Boolean).join("\n\n")
       const nextPrompt =
         compacting.prompt ??
         [
@@ -536,7 +554,7 @@ const layer = Layer.effect(
               (input.overflow
                 ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
                 : "") +
-              "Continue if you have next steps, or stop and ask for clarification if you are unsure how to proceed."
+              "Review the summary above and continue with its first Next Move step. If no next step is actionable, stop and wait for the user instead of restating the summary."
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: continueMsg.id,
