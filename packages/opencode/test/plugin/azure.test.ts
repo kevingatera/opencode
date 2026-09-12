@@ -180,8 +180,8 @@ describe("plugin.azure", () => {
         assert.deepEqual(hooks.auth.methods.map((method) => method.type), ${JSON.stringify(installed ? ["api", "oauth"] : ["api"])})
         if (${installed}) {
           const method = hooks.auth.methods.find((method) => method.type === "oauth")
-          assert.equal(method.prompts[0].type, "select")
-          const authorization = await method.authorize({ resourceSelection: "test-resource" })
+          assert.equal(method.prompts[0].type, "text")
+          const authorization = await method.authorize({ resourceName: "test-resource" })
           const auth = await authorization.callback()
           assert.equal(auth.type, "success")
           assert.equal(auth.accountId, "test-resource")
@@ -198,7 +198,6 @@ describe("plugin.azure", () => {
       expect(result.code).toBe(0)
     }
     expect(await cli.calls()).toEqual([
-      ["cognitiveservices", "account", "list", "--output", "json", "--only-show-errors"],
       ["account", "get-access-token", "--scope", "https://cognitiveservices.azure.com/.default", "--output", "json"],
       ["cognitiveservices", "account", "list", "--output", "json", "--only-show-errors"],
       [
@@ -222,7 +221,7 @@ describe("plugin.azure", () => {
     { name: "logged out", content: '{"subscriptions":[]}', signedIn: false },
     { name: "signed in with BOM", content: '\uFEFF{"subscriptions":[{}]}', signedIn: true },
   ]) {
-    test(`only lists resources for a cached Azure login (${profile.name})`, async () => {
+    test(`does not list Azure resources while initializing plugins (${profile.name})`, async () => {
       await using tmp = await tmpdir()
       const cli = await azureCli(tmp.path)
       process.env.PATH = cli.bin
@@ -233,9 +232,9 @@ describe("plugin.azure", () => {
       delete process.env.AZURE_RESOURCE_GROUP
       const hooks = await AzureAuthPlugin()
 
-      expect(await cli.calls()).toHaveLength(profile.signedIn ? 1 : 0)
+      expect(await cli.calls()).toHaveLength(0)
       expect(hooks.auth?.methods.some((method) => method.type === "oauth")).toBe(true)
-      if (profile.signedIn) expect(oauthMethod(hooks).prompts?.[0].type).toBe("select")
+      expect(oauthMethod(hooks).prompts?.[0].type).toBe("text")
     })
   }
 

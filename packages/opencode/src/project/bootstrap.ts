@@ -35,7 +35,9 @@ const layer = Layer.effect(
       // everything depends on config so eager load it for nice traces
       yield* config.get()
       // Plugin can mutate config so it has to be initialized before anything else.
+      const pluginStarted = Date.now()
       yield* plugin.init()
+      yield* Effect.logInfo("plugin.init finished", { ms: Date.now() - pluginStarted })
       // Each service self-manages its own slow work via Effect.forkScoped against
       // its per-instance state scope. We just await materialization here.
       yield* Effect.forEach(

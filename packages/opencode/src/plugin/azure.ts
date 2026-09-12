@@ -1,6 +1,3 @@
-import { readFile } from "node:fs/promises"
-import { homedir } from "node:os"
-import { join } from "node:path"
 import { InstallationVersion } from "@opencode-ai/core/installation/version"
 import { which } from "@opencode-ai/core/util/which"
 import type { Hooks } from "@opencode-ai/plugin"
@@ -19,9 +16,6 @@ const AzureCliToken = Schema.Struct({
   expiresOn: Schema.optional(Schema.NonEmptyString),
 })
 const decodeAzureCliToken = Schema.decodeUnknownPromise(AzureCliToken)
-const decodeAzureProfile = Schema.decodeUnknownPromise(
-  Schema.fromJsonString(Schema.Struct({ subscriptions: Schema.Array(Schema.Unknown) })),
-)
 
 const decodeAzureAccounts = Schema.decodeUnknownPromise(
   Schema.Array(
@@ -51,20 +45,11 @@ type AzureAccount = { readonly name: string; readonly resourceGroup: string }
 
 export async function AzureAuthPlugin(): Promise<Hooks> {
   const available = Boolean(which("az"))
-  // Avoid launching Azure CLI on unrelated commands just because the executable is installed.
-  const signedIn = available
-    ? await readFile(join(process.env.AZURE_CONFIG_DIR ?? join(homedir(), ".azure"), "azureProfile.json"), "utf8")
-        .then((text) => decodeAzureProfile(text.replace(/^\uFEFF/, "")))
-        .then((profile) => profile.subscriptions.length > 0)
-        .catch(() => false)
-    : false
-  const accounts =
-    !process.env.AZURE_RESOURCE_NAME && !process.env.AZURE_RESOURCE_GROUP && signedIn
-      ? await runAzure(["cognitiveservices", "account", "list", "--output", "json", "--only-show-errors"])
-          .then(decodeAzureAccounts)
-          .catch(() => [])
-      : []
-  return createAzureAuthHooks(runAzure, fetch, accounts, available)
+  // Do not spawn `az cognitiveservices account list` during plugin init.
+  // That call is several seconds on a signed-in CLI and blocks every TUI
+  // launch. Resource discovery stays in model listing and in createAzureAuthHooks
+  // when a caller already has the account list.
+  return createAzureAuthHooks(runAzure, fetch, [], available)
 }
 
 export function createAzureAuthHooks(
