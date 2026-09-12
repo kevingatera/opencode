@@ -206,7 +206,7 @@ export function Session() {
 
   createEffect(() => {
     const title = Locale.truncate(session()?.title ?? "", 50)
-    setEpilogue(sessionEpilogue({ title, sessionID: session()?.id }))
+    setEpilogue(sessionEpilogue({ title, sessionID: session()?.id ?? route.sessionID }))
   })
   onCleanup(() => setEpilogue())
   const children = createMemo(() => {
@@ -289,6 +289,11 @@ export function Session() {
   const toast = useToast()
   const sdk = useSDK()
   const editor = useEditorContext()
+
+  createEffect(() => {
+    if (session()) return
+    void sync.session.sync(route.sessionID)
+  })
 
   createEffect(() => {
     const sessionID = route.sessionID
@@ -1264,7 +1269,14 @@ export function Session() {
       >
         <box flexDirection="row" flexGrow={1} minHeight={0}>
           <box flexGrow={1} minHeight={0} paddingBottom={1} paddingLeft={2} paddingRight={2} gap={1}>
-            <Show when={session()}>
+            <Show
+              when={session()}
+              fallback={
+                <box flexGrow={1} minHeight={0} justifyContent="center" alignItems="center">
+                  <Spinner>Loading session…</Spinner>
+                </box>
+              }
+            >
               <scrollbox
                 ref={(r) => (scroll = r)}
                 viewportOptions={{

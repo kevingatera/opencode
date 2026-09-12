@@ -28,11 +28,8 @@ function wordmark(pad = "") {
 
 export function sessionEpilogue(input: { title: string; sessionID?: string }) {
   const weak = (text: string) => `${dim}${text.padEnd(10, " ")}${reset}`
-  return [
-    ...wordmark("  "),
-    "",
-    `  ${weak("Session")}${bold}${input.title}${reset}`,
-    `  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`,
-    "",
-  ].join("\n")
+  const lines = [...wordmark("  "), "", `  ${weak("Session")}${bold}${input.title}${reset}`]
+  if (input.sessionID) lines.push(`  ${weak("Continue")}${bold}opencode -s ${input.sessionID}${reset}`)
+  lines.push("")
+  return lines.join("\n")
 }

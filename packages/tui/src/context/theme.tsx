@@ -101,6 +101,9 @@ subscribeThemes((themes) => setStore("themes", themes))
 
 export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
   name: "Theme",
+  // Palette detection is async. Blocking the tree on it leaves the default
+  // renderer colors on screen instead of the saved theme (e.g. cursor).
+  blockUntilReady: false,
   init: (props: { mode: "dark" | "light"; source?: ThemeSource }) => {
     const renderer = useRenderer()
     const config = useTuiConfig()
@@ -140,7 +143,7 @@ export const { use: useTheme, provider: ThemeProvider } = createSimpleContext({
             }, {}),
           )
         })
-        .catch(() => setStore("active", "opencode"))
+        .catch(() => {})
     }
 
     onMount(() => {

@@ -85,6 +85,7 @@ export const {
   provider: SyncProvider,
 } = createSimpleContext({
   name: "Sync",
+  blockUntilReady: false,
   init: () => {
     const startup = useTuiStartup()
     const kv = useKV()
@@ -552,9 +553,12 @@ export const {
       const projectPromise = project.sync()
       const sessionListPromise = projectPromise.then(() => listSessions())
 
-      // blocking - include session.list when continuing a session
+      // blocking - include session.list when continuing a session.
+      // provider.list is the same catalog as config.providers plus connected
+      // flags; waiting for both serializes a second full provider build after
+      // the renderer has already taken over the terminal.
       const providersPromise = sdk.client.config.providers({ workspace }, { throwOnError: true })
-      const providerListPromise = sdk.client.provider.list({ workspace }, { throwOnError: true })
+      const providerListPromise = sdk.client.provider.list({ workspace }).then((x) => x.data)
       const capabilitiesPromise = sdk.client.experimental.capabilities
         .get({ workspace }, { throwOnError: true })
         .then((x) => x.data)
@@ -565,58 +569,58 @@ export const {
         .catch(() => emptyConsoleState)
       const agentsPromise = sdk.client.app.agents({ workspace }, { throwOnError: true })
       const configPromise = sdk.client.config.get({ workspace }, { throwOnError: true })
+      const resumeSessionPromise =
+        args.sessionID && !args.fork
+          ? sdk.client
+              .session.get({ sessionID: args.sessionID })
+              .then((x) => x.data)
+              .catch(() => undefined)
+          : Promise.resolve(undefined)
       await Promise.all([
         providersPromise,
-        providerListPromise,
         capabilitiesPromise,
         agentsPromise,
         configPromise,
         projectPromise,
+        resumeSessionPromise,
         ...(args.continue ? [sessionListPromise] : []),
       ])
         .then(async () => {
-          const providersResponse = providersPromise.then((x) => x.data!)
-          const providerListResponse = providerListPromise.then((x) => x.data!)
-          const capabilitiesResponse = capabilitiesPromise
-          const consoleStateResponse = consoleStatePromise
-          const agentsResponse = agentsPromise.then((x) => x.data ?? [])
-          const configResponse = configPromise.then((x) => x.data!)
-          const sessionListResponse = args.continue ? sessionListPromise : undefined
+          const [providers, capabilities, agents, config, sessions, resume] = await Promise.all([
+            providersPromise.then((x) => x.data!),
+            capabilitiesPromise,
+            agentsPromise.then((x) => x.data ?? []),
+            configPromise.then((x) => x.data!),
+            args.continue ? sessionListPromise : Promise.resolve(undefined),
+            resumeSessionPromise,
+          ])
 
-          return Promise.all([
-            providersResponse,
-            providerListResponse,
-            capabilitiesResponse,
-            consoleStateResponse,
-            agentsResponse,
-            configResponse,
-            ...(sessionListResponse ? [sessionListResponse] : []),
-          ]).then((responses) => {
-            const providers = responses[0]
-            const providerList = responses[1]
-            const capabilities = responses[2]
-            const consoleState = responses[3]
-            const agents = responses[4]
-            const config = responses[5]
-            const sessions = responses[6]
-
-            batch(() => {
-              setStore("provider", reconcile(providers.providers))
-              setStore("provider_default", reconcile(providers.default))
-              setStore("provider_next", reconcile(providerList))
-              setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
-              setStore("console_state", reconcile(consoleState))
-              setStore("agent", reconcile(agents))
-              setStore("config", reconcile(config))
-              if (sessions !== undefined) setStore("session", reconcile(sessions))
-            })
+          batch(() => {
+            setStore("provider", reconcile(providers.providers))
+            setStore("provider_default", reconcile(providers.default))
+            setStore("capabilities", "experimentalBackgroundSubagents", capabilities?.backgroundSubagents === true)
+            setStore("agent", reconcile(agents))
+            setStore("config", reconcile(config))
+            const next = [...(sessions ?? []), ...(resume ? [resume] : [])]
+            if (next.length > 0) setStore("session", reconcile(mergeSessions(store.session, next)))
           })
         })
         .then(() => {
           if (store.status !== "complete") setStore("status", "partial")
           // non-blocking
           void Promise.all([
-            ...(args.continue ? [] : [sessionListPromise.then((sessions) => setStore("session", reconcile(sessions)))]),
+            providerListPromise.then((providerList) => {
+              if (providerList) setStore("provider_next", reconcile(providerList))
+            }),
+            ...(args.continue
+              ? []
+              : [
+                  // First page is the 50 newest sessions. Merge so an older
+                  // `opencode -s` resume is not dropped from the store.
+                  sessionListPromise.then((sessions) =>
+                    setStore("session", reconcile(mergeSessions(store.session, sessions))),
+                  ),
+                ]),
             consoleStatePromise.then((consoleState) => setStore("console_state", reconcile(consoleState))),
             sdk.client.command.list({ workspace }).then((x) => setStore("command", reconcile(x.data ?? []))),
             sdk.client.lsp.status({ workspace }).then((x) => setStore("lsp", reconcile(x.data ?? []))),
@@ -793,7 +797,7 @@ export const {
           return last.time.completed ? "idle" : "working"
         },
         async sync(sessionID: string) {
-          if (fullSyncedSessions.has(sessionID)) return
+          if (fullSyncedSessions.has(sessionID) && result.session.get(sessionID)) return
           const syncing = syncingSessions.get(sessionID)
           if (syncing) return syncing
           const tracker = { messages: new Set<string>(), parts: new Set<string>() }

@@ -62,6 +62,9 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
     const permission = usePermission()
 
     function isModelValid(model: { providerID: string; modelID: string }) {
+      // Catalog fetch is the slow part of TUI startup. Until it lands, accept
+      // the last-used model so the prompt footer is not an empty gap.
+      if (sync.data.provider.length === 0) return Boolean(model.providerID && model.modelID)
       const provider = sync.data.provider.find((item) => item.id === model.providerID)
       return !!provider?.models[model.modelID]
     }
@@ -94,7 +97,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return agents()
         },
         current() {
-          return agents().find((x) => x.name === agentStore.current) ?? agents().at(0)
+          const list = agents()
+          const match = list.find((x) => x.name === agentStore.current) ?? list.at(0)
+          if (match) return match
+          const name = agentStore.current ?? "build"
+          return {
+            name,
+            mode: "primary" as const,
+            permission: [],
+            options: {},
+          }
         },
         set(name: string) {
           if (!agents().some((x) => x.name === name))
@@ -369,7 +381,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           current() {
             const v = this.selected()
             if (!v) return undefined
-            if (!this.list().includes(v)) return undefined
+            const known = this.list()
+            if (known.length > 0 && !known.includes(v)) return undefined
             return v
           },
           list() {

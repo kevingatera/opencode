@@ -113,7 +113,10 @@ test("app.exit prints the session epilogue after scoped cleanup", async () => {
     )
 
     await ready
-    await setup.renderOnce()
+    const until = Date.now() + 3000
+    while ((!api || !api.state.ready) && Date.now() < until) {
+      await setup.renderOnce()
+    }
     await setup.renderOnce()
     api?.keymap.dispatchCommand("app.exit")
     await task
