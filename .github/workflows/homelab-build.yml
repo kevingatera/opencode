@@ -1,0 +1,54 @@
+name: homelab build
+
+on:
+  push:
+    branches: [homelab]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.settings.name }} CLI
+    strategy:
+      fail-fast: false
+      matrix:
+        settings:
+          - name: linux-arm64
+            runner: blacksmith-4vcpu-ubuntu-2404-arm
+          - name: linux-x64
+            runner: blacksmith-4vcpu-ubuntu-2404
+          - name: macos-arm64
+            runner: macos-26
+          - name: macos-x64
+            runner: macos-26-intel
+          - name: windows-arm64
+            runner: windows-2025
+          - name: windows-x64
+            runner: blacksmith-4vcpu-windows-2025
+    runs-on: ${{ matrix.settings.runner }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Setup Bun
+        uses: ./.github/actions/setup-bun
+
+      - name: Build CLI binaries
+        run: bun run --cwd packages/opencode build --single --skip-install
+        env:
+          OPENCODE_CHANNEL: homelab
+          OPENCODE_VERSION: 0.0.0-homelab.${{ github.sha }}
+
+      - name: Upload CLI binaries
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opencode-cli-homelab-${{ matrix.settings.name }}-${{ github.sha }}
+          path: packages/opencode/dist/opencode-*/bin/opencode*
+          if-no-files-found: error
+          retention-days: 14
