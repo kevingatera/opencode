@@ -14,7 +14,6 @@ import {
   untrack,
   useContext,
 } from "solid-js"
-import { Dynamic } from "solid-js/web"
 import path from "node:path"
 import { mkdir, writeFile } from "node:fs/promises"
 import { useRoute, useRouteData } from "../../context/route"
@@ -40,7 +39,7 @@ import type {
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
 import { webSearchProviderLabel } from "../../util/tool-display"
-import { useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
+import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
 import { useEditorContext } from "../../context/editor"
 import { openEditor } from "../../editor"
@@ -1960,7 +1959,7 @@ function GenericTool(props: ToolProps) {
     <Show
       when={props.output && ctx.showGenericToolOutput()}
       fallback={
-        <InlineTool icon="⚙" pending="Writing command..." complete={true} part={props.part}>
+        <InlineTool icon="⚙" pending="Writing command…" complete={true} part={props.part}>
           {props.tool} {input(props.input)}
         </InlineTool>
       }
@@ -2244,7 +2243,7 @@ function Shell(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="$" pending="Writing command..." complete={stringValue(props.input.command)} part={props.part}>
+        <InlineTool icon="$" pending="Writing command…" complete={stringValue(props.input.command)} part={props.part}>
           {stringValue(props.input.command)}
         </InlineTool>
       </Match>
@@ -2313,8 +2312,8 @@ function Write(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing write..." complete={filePath()} part={props.part}>
-          Write {pathFormatter.format(filePath())}
+        <InlineTool icon="←" pending="Preparing write…" complete={stringValue(props.input.filePath)} part={props.part}>
+          Write {pathFormatter.format(stringValue(props.input.filePath))}
         </InlineTool>
       </Match>
     </Switch>
@@ -2324,7 +2323,7 @@ function Write(props: ToolProps) {
 function Glob(props: ToolProps) {
   const pathFormatter = usePathFormatter()
   return (
-    <InlineTool icon="✱" pending="Finding files..." complete={stringValue(props.input.pattern)} part={props.part}>
+    <InlineTool icon="✱" pending="Finding files…" complete={stringValue(props.input.pattern)} part={props.part}>
       Glob "{stringValue(props.input.pattern)}"{" "}
       <Show when={stringValue(props.input.path)}>in {pathFormatter.format(stringValue(props.input.path))} </Show>
       <Show when={numberValue(props.metadata.count)}>
@@ -2348,8 +2347,14 @@ function Read(props: ToolProps) {
   })
   return (
     <>
-      <InlineTool icon="→" pending="Reading file..." complete={filePath()} spinner={isRunning()} part={props.part}>
-        Read {pathFormatter.format(filePath())} {input(props.input, ["filePath", "path"])}
+      <InlineTool
+        icon="→"
+        pending="Reading file…"
+        complete={stringValue(props.input.filePath)}
+        spinner={isRunning()}
+        part={props.part}
+      >
+        Read {pathFormatter.format(stringValue(props.input.filePath))} {input(props.input, ["filePath"])}
       </InlineTool>
       <For each={loaded()}>
         {(filepath) => (
@@ -2367,7 +2372,7 @@ function Read(props: ToolProps) {
 function Grep(props: ToolProps) {
   const pathFormatter = usePathFormatter()
   return (
-    <InlineTool icon="✱" pending="Searching content..." complete={stringValue(props.input.pattern)} part={props.part}>
+    <InlineTool icon="✱" pending="Searching content…" complete={stringValue(props.input.pattern)} part={props.part}>
       Grep "{stringValue(props.input.pattern)}"{" "}
       <Show when={stringValue(props.input.path)}>in {pathFormatter.format(stringValue(props.input.path))} </Show>
       <Show when={numberValue(props.metadata.matches)}>
@@ -2418,7 +2423,7 @@ function Ls(props: ToolProps) {
 
 function WebFetch(props: ToolProps) {
   return (
-    <InlineTool icon="%" pending="Fetching from the web..." complete={stringValue(props.input.url)} part={props.part}>
+    <InlineTool icon="%" pending="Fetching from the web…" complete={stringValue(props.input.url)} part={props.part}>
       WebFetch {stringValue(props.input.url)}
     </InlineTool>
   )
@@ -2426,7 +2431,7 @@ function WebFetch(props: ToolProps) {
 
 function WebSearch(props: ToolProps) {
   return (
-    <InlineTool icon="◈" pending="Searching web..." complete={stringValue(props.input.query)} part={props.part}>
+    <InlineTool icon="◈" pending="Searching web…" complete={stringValue(props.input.query)} part={props.part}>
       {webSearchProviderLabel(props.metadata.provider)} "{stringValue(props.input.query)}"{" "}
       <Show when={numberValue(props.metadata.numResults)}>({numberValue(props.metadata.numResults)} results)</Show>
     </InlineTool>
@@ -2485,56 +2490,49 @@ function Task(props: ToolProps) {
         (sessionID() ? sync.session.get(sessionID()!)?.agent : undefined),
     ),
   )
-  const description = createMemo(() => stringValue(props.input.description) ?? "")
-  const title = createMemo(() => {
-    const name = description() || "Task"
-    return formatSubagentTitle(agentName(), name, props.metadata.background === true)
-  })
-  const detail = createMemo(() => {
+
+  const content = createMemo(() => {
+    const description = stringValue(props.input.description)
+    if (!description) return ""
+    let content = [formatSubagentTitle(agentName(), description, props.metadata.background === true)]
+
     const retrying = retry()
     if (isRunning() && retrying) {
-      return formatSubagentRetry(retrying.attempt, Locale.truncate(retrying.message, 80))
-    }
-    if (isRunning() && tools().length > 0) {
+      content.push(`↳ ${formatSubagentRetry(retrying.attempt, Locale.truncate(retrying.message, 80))}`)
+    } else if (isRunning() && tools().length > 0) {
       if (current()) {
-        return Locale.truncate(formatSubagentCurrentTool(current()!.tool, current()!.state), 80)
-      }
-      return formatSubagentToolcalls(tools().length)
+        const state = current()!.state
+        const title = state.status === "running" || state.status === "completed" ? state.title : undefined
+        content.push(`↳ ${Locale.titlecase(current()!.tool)} ${title}`)
+      } else content.push(`↳ ${formatSubagentToolcalls(tools().length)}`)
     }
+
     if (!isRunning() && props.part.state.status === "completed") {
-      return formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))
+      content.push(`↳ ${formatCompletedSubagentDetail(tools().length, Locale.duration(duration()))}`)
     }
-    return
+
+    return content.join("\n")
   })
 
   return (
-    <box flexShrink={0}>
-      <InlineTool
-        icon={props.part.state.status === "completed" ? "✓" : "•"}
-        separate={true}
-        color={retry() ? theme.error : undefined}
-        spinner={isRunning()}
-        complete={description() || title()}
-        pending="Delegating..."
-        part={props.part}
-        onClick={() => {
-          if (sessionID()) {
-            navigate({ type: "session", sessionID: sessionID()! })
-          }
-          const status = retry()
-          if (status) void DialogAlert.show(dialog, "Retry Error", status.message)
-        }}
-      >
-        {title()}
-      </InlineTool>
-      <Show when={detail()}>
-        {(value) => (
-          <text paddingLeft={5} fg={retry() ? theme.error : theme.textMuted}>
-            ↳ {value()}
-          </text>
-        )}
-      </Show>
-    </box>
+    <InlineTool
+      icon={props.part.state.status === "completed" ? "✓" : "│"}
+      separate={true}
+      color={retry() ? theme.error : undefined}
+      spinner={isRunning()}
+      complete={stringValue(props.input.description)}
+      pending="Delegating…"
+      part={props.part}
+      onClick={() => {
+        if (sessionID()) {
+          navigate({ type: "session", sessionID: sessionID()! })
+        }
+        const status = retry()
+        if (status) void DialogAlert.show(dialog, "Retry Error", status.message)
+      }}
+    >
+      {content()}
+    </InlineTool>
   )
 }
 
@@ -2748,8 +2746,8 @@ function Edit(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="←" pending="Preparing edit..." complete={filePath()} part={props.part}>
-          Edit {pathFormatter.format(filePath())} {input({ replaceAll: props.input.replaceAll })}
+        <InlineTool icon="←" pending="Preparing edit…" complete={stringValue(props.input.filePath)} part={props.part}>
+          Edit {pathFormatter.format(stringValue(props.input.filePath))} {input({ replaceAll: props.input.replaceAll })}
         </InlineTool>
       </Match>
     </Switch>
@@ -2767,7 +2765,7 @@ function ApplyPatch(props: ToolProps) {
         </For>
       </Match>
       <Match when={true}>
-        <InlineTool icon="%" pending="Preparing patch..." failure="Patch failed" complete={false} part={props.part}>
+        <InlineTool icon="%" pending="Preparing patch…" failure="Patch failed" complete={false} part={props.part}>
           Patch
         </InlineTool>
       </Match>
@@ -2871,14 +2869,8 @@ function TodoWrite(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool
-          icon="⚙"
-          pending="Updating todos..."
-          failure="Todo update failed"
-          complete={false}
-          part={props.part}
-        >
-          Updating todos...
+        <InlineTool icon="⚙" pending="Updating todos…" failure="Todo update failed" complete={false} part={props.part}>
+          Updating todos…
         </InlineTool>
       </Match>
     </Switch>
@@ -2913,7 +2905,7 @@ function Question(props: ToolProps) {
         </BlockTool>
       </Match>
       <Match when={true}>
-        <InlineTool icon="→" pending="Asking questions..." complete={count()} part={props.part}>
+        <InlineTool icon="→" pending="Asking questions…" complete={count()} part={props.part}>
           Asked {count()} question{count() !== 1 ? "s" : ""}
         </InlineTool>
       </Match>
@@ -2923,7 +2915,7 @@ function Question(props: ToolProps) {
 
 function Skill(props: ToolProps) {
   return (
-    <InlineTool icon="→" pending="Loading skill..." complete={stringValue(props.input.name)} part={props.part}>
+    <InlineTool icon="→" pending="Loading skill…" complete={stringValue(props.input.name)} part={props.part}>
       Skill "{stringValue(props.input.name)}"
     </InlineTool>
   )
