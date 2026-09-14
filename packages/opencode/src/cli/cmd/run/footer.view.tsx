@@ -468,12 +468,14 @@ export function RunFooterView(props: RunFooterViewProps) {
 
     return shell() ? "Shell mode" : ""
   })
+  const duration = createMemo(() => props.state().duration)
   const activityMeta = createMemo(() => {
-    if (!responsive().statusline.showActivityMeta || usage().length === 0) {
+    if (!responsive().statusline.showActivityMeta) {
       return ""
     }
 
-    return usage()
+    // duration updates per-turn (no ticker), so it shows the last turn's wall clock.
+    return [usage(), duration()].filter((part) => part.length > 0).join(" · ")
   })
   const modelStatus = createMemo(() => {
     const current = props.currentModel()

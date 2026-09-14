@@ -1200,14 +1200,14 @@ test("direct footer omits interrupt key hint when interrupt is unbound", async (
 
 test("direct footer shows full usage metadata when room is available", async () => {
   const app = await renderFooter({
-    state: { usage: "159.6K (16%) · $4.23" },
+    state: { usage: "159.6K (16%) · $4.23", duration: "12m 30s" },
   })
 
   try {
     await app.renderOnce()
     const frame = app.captureCharFrame()
 
-    expect(frame).toContain("159.6K (16%) · $4.23")
+    expect(frame).toContain("159.6K (16%) · $4.23 · 12m 30s")
   } finally {
     app.cleanup()
   }

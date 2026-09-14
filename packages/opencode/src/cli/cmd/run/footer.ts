@@ -399,6 +399,7 @@ export class RunFooter implements FooterApi {
   public event(next: FooterEvent): void {
     if (next.type === "turn.duration") {
       const current = this.currentModel()
+      this.patch({ duration: next.duration })
       this.flush()
       this.flushing = this.flushing
         .then(() =>
