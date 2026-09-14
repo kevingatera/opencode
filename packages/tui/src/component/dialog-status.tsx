@@ -1,18 +1,85 @@
 import { TextAttributes } from "@opentui/core"
 import { fileURLToPath } from "bun"
+import type { AssistantMessage } from "@opencode-ai/sdk/v2"
 import { useTheme } from "../context/theme"
 import { useDialog } from "../ui/dialog"
 import { useSync } from "../context/sync"
+import { useRoute } from "../context/route"
 import { For, Match, Switch, Show, createMemo } from "solid-js"
 
 export type DialogStatusProps = {}
+
+const money = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+})
 
 export function DialogStatus() {
   const sync = useSync()
   const { theme } = useTheme()
   const dialog = useDialog()
+  const route = useRoute()
+
+  const session = createMemo(() => (route.data.type === "session" ? sync.session.get(route.data.sessionID) : undefined))
 
   const enabledFormatters = createMemo(() => sync.data.formatter.filter((f) => f.enabled))
+
+  const usage = createMemo(() => {
+    const current = session()
+    const messages = current ? (sync.data.message[current.id] ?? []) : []
+    const last = messages.findLast((item): item is AssistantMessage => item.role === "assistant" && item.tokens.output > 0)
+    const detail = last
+      ? last.tokens
+      : current?.tokens
+        ? {
+            input: current.tokens.input,
+            output: current.tokens.output,
+            reasoning: current.tokens.reasoning,
+            cache: current.tokens.cache,
+          }
+        : undefined
+    const modelInfo = last ? { providerID: last.providerID, id: last.modelID } : current?.model
+    const model = modelInfo
+      ? sync.data.provider.find((item) => item.id === modelInfo.providerID)?.models[modelInfo.id]
+      : undefined
+    const tokens = detail
+      ? detail.input + detail.output + detail.reasoning + detail.cache.read + detail.cache.write
+      : 0
+    return {
+      input: detail?.input ?? 0,
+      output: detail?.output ?? 0,
+      reasoning: detail?.reasoning ?? 0,
+      cacheRead: detail?.cache.read ?? 0,
+      cacheWrite: detail?.cache.write ?? 0,
+      tokens,
+      limit: model?.limit.context,
+      percent: model?.limit.context ? Math.round((tokens / model.limit.context) * 100) : null,
+    }
+  })
+
+  const tokensText = createMemo(() => {
+    const u = usage()
+    const parts = [`${u.input.toLocaleString()} in`, `${u.output.toLocaleString()} out`]
+    if (u.reasoning > 0) parts.push(`${u.reasoning.toLocaleString()} reasoning`)
+    if (u.cacheRead > 0) parts.push(`${u.cacheRead.toLocaleString()} cache read`)
+    if (u.cacheWrite > 0) parts.push(`${u.cacheWrite.toLocaleString()} cache write`)
+    return parts.join(" · ")
+  })
+
+  const contextText = createMemo(() => {
+    const u = usage()
+    if (!u.limit) return `${u.tokens.toLocaleString()} tokens`
+    return `${u.tokens.toLocaleString()} / ${u.limit.toLocaleString()} tokens (${u.percent}%)`
+  })
+
+  const modelText = createMemo(() => {
+    const s = session()
+    if (!s?.model) return "unknown"
+    const label = `${s.model.providerID}/${s.model.id}`
+    return s.model.variant ? `${label} (${s.model.variant})` : label
+  })
+
+  const agentText = createMemo(() => session()?.agent ?? "unknown")
 
   const plugins = createMemo(() => {
     const list = sync.data.config.plugin ?? []
@@ -50,6 +117,49 @@ export function DialogStatus() {
           esc
         </text>
       </box>
+      <Show when={session()}>
+        {(s) => (
+          <box>
+            <text fg={theme.text}>Session</text>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} style={{ fg: theme.success }}>
+                •
+              </text>
+              <text wrapMode="word" fg={theme.text}>
+                <b>Model</b>{" "}
+                <span style={{ fg: theme.textMuted }}>
+                  {modelText()}
+                  {s().agent ? ` · ${agentText()}` : ""}
+                </span>
+              </text>
+            </box>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} style={{ fg: theme.success }}>
+                •
+              </text>
+              <text wrapMode="word" fg={theme.text}>
+                <b>Cost</b> <span style={{ fg: theme.textMuted }}>{money.format(s().cost ?? 0)}</span>
+              </text>
+            </box>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} style={{ fg: theme.success }}>
+                •
+              </text>
+              <text wrapMode="word" fg={theme.text}>
+                <b>Tokens</b> <span style={{ fg: theme.textMuted }}>{tokensText()}</span>
+              </text>
+            </box>
+            <box flexDirection="row" gap={1}>
+              <text flexShrink={0} style={{ fg: theme.success }}>
+                •
+              </text>
+              <text wrapMode="word" fg={theme.text}>
+                <b>Context</b> <span style={{ fg: theme.textMuted }}>{contextText()}</span>
+              </text>
+            </box>
+          </box>
+        )}
+      </Show>
       <Show when={Object.keys(sync.data.mcp).length > 0} fallback={<text fg={theme.text}>No MCP Servers</text>}>
         <box>
           <text fg={theme.text}>{Object.keys(sync.data.mcp).length} MCP Servers</text>
