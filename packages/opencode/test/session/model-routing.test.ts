@@ -241,6 +241,39 @@ const fallbackConfig: Config.Info = {
   },
 }
 
+const sessionCandidateConfig: Config.Info = {
+  ...config,
+  model_routing: {
+    scope: "same",
+    roles: {
+      compaction: ["session", "route-a/gpt"],
+    },
+  },
+}
+
+it.instance(
+  "session candidate runs the current model and falls back when it is not permitted",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      // The running model satisfies same-scope and availability, so compaction
+      // follows whatever the session is on instead of a static candidate.
+      expect(
+        yield* routing.resolve({ sessionID: root.id, role: "compaction", model: a, auxiliary: true }),
+      ).toMatchObject(a)
+      // A running model outside the catalog is not permitted, so the next
+      // static candidate (same provider, same scope) takes over.
+      const unavailable = Provider.parseModel("route-a/missing")
+      const gpt = Provider.parseModel("route-a/gpt")
+      expect(
+        yield* routing.resolve({ sessionID: root.id, role: "compaction", model: unavailable, auxiliary: true }),
+      ).toMatchObject(gpt)
+    }),
+  { config: sessionCandidateConfig },
+)
+
 it.instance(
   "same-scope roles fall back to the anchor model when anchor_fallback is enabled",
   () =>

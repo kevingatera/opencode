@@ -119,7 +119,12 @@ const layer = Layer.effect(
                 ? user.model.providerID
                 : undefined))
           : undefined
-      const candidates = state.roles[input.role]?.map(Provider.parseModel) ?? [
+      // The literal "session" candidate means "whatever this session is
+      // currently running" — callers pass the live model as input.model, so
+      // it participates in the same permitted checks as any other candidate.
+      const candidates = state.roles[input.role]?.map((candidate) =>
+        candidate === "session" ? input.model : Provider.parseModel(candidate),
+      ) ?? [
         !session.parentID && !input.auxiliary ? input.model : state.anchor,
       ]
       const permitted = (candidate: Model) =>
@@ -229,7 +234,7 @@ const layer = Layer.effect(
         `Provider anchor: ${state.anchor.providerID}`,
         ...roles,
         `Unconfigured child and auxiliary roles: ${state.anchor.providerID}/${state.anchor.modelID} (subject to availability and child provider pin)`,
-        "Role candidates are snapshotted when this root opts in; /routing refresh rewrites the snapshot (scope, anchor_fallback, roles) from the current config while keeping the anchor and child provider pins, and removes the stored state when model_routing config is gone. Configured roles always use their candidate lists; with anchor_fallback enabled, a same-scope role with no matching candidate runs the anchor model instead of failing (shown as anchor fallback above).",
+        "Role candidates are snapshotted when this root opts in; /routing refresh rewrites the snapshot (scope, anchor_fallback, roles) from the current config while keeping the anchor and child provider pins, and removes the stored state when model_routing config is gone. Configured roles always use their candidate lists; the literal \"session\" candidate follows whatever model the session is currently running (skipped for a later candidate when the current model is not permitted); with anchor_fallback enabled, a same-scope role with no matching candidate runs the anchor model instead of failing (shown as anchor fallback above).",
         "For unconfigured root roles, /models selects the main model: same allows the anchor provider; curated also allows explicit choices from other permitted available providers.",
         "The provider anchor stays fixed when /models changes, so switching back to same restores the original provider restriction.",
         "Applies to this root and nested children. Resumed children retain their provider; incompatible routes fail without fallback.",
