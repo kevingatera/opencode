@@ -13,11 +13,14 @@ export function createSimpleContext<T, Props extends Record<string, any>>(input:
     context: ctx,
     provider: (props: ParentProps<Props>) => {
       const init = input.init(props)
-      const tree = <ctx.Provider value={init}>{props.children}</ctx.Provider>
-      if (input.blockUntilReady === false) return tree
+      if (input.blockUntilReady === false) {
+        return <ctx.Provider value={init}>{props.children}</ctx.Provider>
+      }
       return (
         // @ts-expect-error
-        <Show when={init.ready === undefined || init.ready === true}>{tree}</Show>
+        <Show when={init.ready === undefined || init.ready === true}>
+          <ctx.Provider value={init}>{props.children}</ctx.Provider>
+        </Show>
       )
     },
     use() {

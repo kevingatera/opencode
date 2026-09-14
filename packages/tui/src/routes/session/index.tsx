@@ -291,7 +291,7 @@ export function Session() {
 
   createEffect(() => {
     if (session()) return
-    void sync.session.sync(route.sessionID)
+    void sync.session.sync(route.sessionID).catch(() => undefined)
   })
 
   createEffect(() => {
@@ -2446,7 +2446,7 @@ function Task(props: ToolProps) {
 
   onMount(() => {
     const sessionID = stringValue(props.metadata.sessionId)
-    if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID)
+    if (sessionID && !sync.data.message[sessionID]?.length) void sync.session.sync(sessionID).catch(() => undefined)
   })
 
   const sessionID = createMemo(() => stringValue(props.metadata.sessionId))

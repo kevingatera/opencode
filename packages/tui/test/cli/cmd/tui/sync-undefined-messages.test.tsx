@@ -27,7 +27,9 @@ describe("tui sync (#26560)", () => {
     }
     const { app, sync } = await mount((url) => {
       if (url.pathname === `/session/${sessionID}`) return json(sessionPayload)
-      if (url.pathname === `/session/${sessionID}/messages`) return json({}, { status: 500 })
+      // The SDK's endpoint is /session/{sessionID}/message (singular);
+      // serve the 500 from the real path so the error actually reaches sync.
+      if (url.pathname === `/session/${sessionID}/message`) return json({}, { status: 500 })
       if (url.pathname === `/session/${sessionID}/todo`) return json([])
       if (url.pathname === `/session/${sessionID}/diff`) return json([])
       if (url.pathname === "/session") return json([sessionPayload])

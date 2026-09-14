@@ -809,7 +809,10 @@ export const {
               sdk.client.session.todo({ sessionID }),
               sdk.client.session.diff({ sessionID }),
             ])
-            const olderCursor = messages.response.headers.get("x-next-cursor") ?? undefined
+            // A failed messages request (transport error or non-2xx) leaves
+            // `response`/`data` undefined on the SDK result; treat it as an
+            // empty first page rather than crashing the sync.
+            const olderCursor = messages.response?.headers.get("x-next-cursor") ?? undefined
             followingSessions.add(sessionID)
             setStore("messagePage", sessionID, {
               olderCursor,
