@@ -910,6 +910,41 @@ it.instance(
 )
 
 it.instance(
+  "reply - session approves in memory without persisting",
+  () =>
+    Effect.gen(function* () {
+      const fiber = yield* ask({
+        id: PermissionV1.ID.make("per_session"),
+        sessionID: SessionID.make("session_test"),
+        permission: "bash",
+        patterns: ["uv pip install numpy"],
+        metadata: {},
+        always: ["uv pip install *"],
+        ruleset: [],
+      }).pipe(Effect.forkScoped)
+
+      yield* waitForPending(1)
+      yield* reply({ requestID: PermissionV1.ID.make("per_session"), reply: "session" })
+      yield* Fiber.join(fiber)
+
+      const result = yield* ask({
+        sessionID: SessionID.make("session_test2"),
+        permission: "bash",
+        patterns: ["uv pip install numpy"],
+        metadata: {},
+        always: [],
+        ruleset: [],
+      })
+      expect(result).toBeUndefined()
+
+      const saved = yield* PermissionSaved.Service
+      const projectID = (yield* InstanceState.context).project.id
+      expect(yield* saved.list({ projectID })).toEqual([])
+    }),
+  { git: true },
+)
+
+it.instance(
   "ask - allows a command from saved always-allow across a fresh in-memory state",
   () =>
     Effect.gen(function* () {

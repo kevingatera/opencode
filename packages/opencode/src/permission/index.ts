@@ -159,7 +159,8 @@ const layer = Layer.effect(
           action: "allow",
         })
       }
-      if (existing.info.always.length) {
+      // "session" approval stays in memory only; it is gone on process restart.
+      if (input.reply === "always" && existing.info.always.length) {
         yield* saved.add({
           projectID: (yield* InstanceState.context).project.id,
           action: existing.info.permission,

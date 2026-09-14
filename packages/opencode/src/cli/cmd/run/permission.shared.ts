@@ -3,7 +3,7 @@
 // Lives outside the JSX component so it can be tested independently. The
 // machine has three stages:
 //
-//   permission → initial view with Allow once / Always / Reject options
+//   permission → initial view with Allow once / Allow until restart / Always / Reject options
 //   always     → confirmation step (Confirm / Cancel)
 //   reject     → text input for rejection message
 //
@@ -20,7 +20,7 @@ import { toolPath, toolPermissionInfo } from "./tool"
 type Dict = Record<string, unknown>
 
 export type PermissionStage = "permission" | "always" | "reject"
-export type PermissionOption = "once" | "always" | "reject" | "confirm" | "cancel"
+export type PermissionOption = "once" | "session" | "always" | "reject" | "confirm" | "cancel"
 
 export type PermissionBodyState = {
   requestID: string
@@ -79,7 +79,7 @@ export function createPermissionBodyState(requestID: string): PermissionBodyStat
 
 export function permissionOptions(stage: PermissionStage): PermissionOption[] {
   if (stage === "permission") {
-    return ["once", "always", "reject"]
+    return ["once", "session", "always", "reject"]
   }
 
   if (stage === "always") {
@@ -125,17 +125,18 @@ export function permissionInfo(request: PermissionRequest): PermissionInfo {
 
 export function permissionAlwaysLines(request: PermissionRequest): string[] {
   if (request.always.length === 1 && request.always[0] === "*") {
-    return [`This will allow ${request.permission} until OpenCode is restarted.`]
+    return [`This will allow ${request.permission} across restarts (saved for this project).`]
   }
 
   return [
-    "This will allow the following patterns until OpenCode is restarted.",
+    "This will allow the following patterns across restarts (saved for this project).",
     ...request.always.map((item) => `- ${item}`),
   ]
 }
 
 export function permissionLabel(option: PermissionOption): string {
   if (option === "once") return "Allow once"
+  if (option === "session") return "Allow until restart"
   if (option === "always") return "Allow always"
   if (option === "reject") return "Reject"
   if (option === "confirm") return "Confirm"
@@ -184,6 +185,13 @@ export function permissionRun(state: PermissionBodyState, requestID: string, opt
           stage: "always",
           selected: "confirm",
         },
+      }
+    }
+
+    if (option === "session") {
+      return {
+        state,
+        reply: permissionReply(requestID, "session"),
       }
     }
 

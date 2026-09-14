@@ -49,6 +49,15 @@ describe("run permission shared", () => {
     })
   })
 
+  test("replies immediately for allow until restart", () => {
+    const out = permissionRun(createPermissionBodyState("perm-1"), "perm-1", "session")
+
+    expect(out.reply).toEqual({
+      requestID: "perm-1",
+      reply: "session",
+    })
+  })
+
   test("builds trimmed reject replies and stage transitions", () => {
     const next = permissionRun(createPermissionBodyState("perm-1"), "perm-1", "reject")
     expect(next.state.stage).toBe("reject")
@@ -132,11 +141,11 @@ describe("run permission shared", () => {
 
   test("formats always-allow copy for wildcard and explicit patterns", () => {
     expect(permissionAlwaysLines(req({ permission: "bash", always: ["*"] }))).toEqual([
-      "This will allow bash until OpenCode is restarted.",
+      "This will allow bash across restarts (saved for this project).",
     ])
 
     expect(permissionAlwaysLines(req({ always: ["src/**/*.ts", "src/**/*.tsx"] }))).toEqual([
-      "This will allow the following patterns until OpenCode is restarted.",
+      "This will allow the following patterns across restarts (saved for this project).",
       "- src/**/*.ts",
       "- src/**/*.tsx",
     ])
