@@ -1,0 +1,28 @@
+{
+  "providers": [
+    {
+      "id": "commandcode",
+      "baseURL": "https://api.commandcode.ai/provider/v1",
+      "auth": "none",
+      "managed": "config"
+    },
+    {
+      "id": "commandcode-anthropic",
+      "baseURL": "https://api.commandcode.ai/provider/v1",
+      "auth": "none",
+      "managed": "config"
+    },
+    {
+      "id": "opencode-go",
+      "baseURL": "https://opencode.ai/zen/go/v1",
+      "auth": "none",
+      "managed": "report"
+    },
+    {
+      "id": "github-copilot",
+      "baseURL": "https://api.githubcopilot.com",
+      "auth": "authstore",
+      "managed": "report"
+    }
+  ]
+}
