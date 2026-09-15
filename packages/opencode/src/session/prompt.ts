@@ -56,6 +56,7 @@ import { eq } from "drizzle-orm"
 import { SessionTable } from "@opencode-ai/core/session/sql"
 import { SessionReminders } from "./reminders"
 import { SessionTools } from "./tools"
+import { HumanWait } from "./human-wait"
 import { LLMEvent } from "@opencode-ai/llm"
 
 // @ts-ignore
@@ -361,14 +362,26 @@ const layer = Layer.effect(
                 state: { ...part.state, ...val },
               } satisfies SessionV1.ToolPart)
             }),
-          ask: (req: any) =>
-            permission
+          ask: (req: any) => {
+            const start = Date.now()
+            return permission
               .ask({
                 ...req,
                 sessionID,
                 ruleset: Permission.merge(taskAgent.permission, session.permission ?? []),
               })
-              .pipe(Effect.orDie),
+              .pipe(
+                Effect.orDie,
+                Effect.ensuring(
+                  Effect.gen(function* () {
+                    const waited = Date.now() - start
+                    if (waited <= 0) return
+                    if (part.state.status !== "running") return
+                    part = yield* sessions.updatePart(HumanWait.accumulateWait(part, waited))
+                  }).pipe(Effect.ignore),
+                ),
+              )
+          },
         })
         .pipe(
           Effect.catchCause((cause) => {

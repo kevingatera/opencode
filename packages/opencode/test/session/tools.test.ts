@@ -165,3 +165,106 @@ it.effect("preserves running tool start time across metadata updates", () =>
     }
   }),
 )
+
+const blockingPermission = Permission.Service.of({
+  ask: () => Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 30))),
+  reply: () => Effect.void,
+  list: () => Effect.succeed([]),
+} satisfies Permission.Interface)
+
+const askLayer = Layer.mergeAll(
+  Layer.succeed(Plugin.Service, fakePlugin),
+  Layer.succeed(Permission.Service, blockingPermission),
+  Layer.succeed(MCP.Service, fakeMcp()),
+  Layer.succeed(Truncate.Service, fakeTruncate),
+  RuntimeFlags.layer(),
+  Layer.succeed(
+    ToolRegistry.Service,
+    ToolRegistry.Service.of({
+      ids: () => Effect.succeed(["asker"]),
+      all: () => Effect.succeed([]),
+      named: () => Effect.die("unused"),
+      tools: () =>
+        Effect.succeed([
+          {
+            id: "asker",
+            description: "blocks in permission ask",
+            parameters: Schema.Struct({}),
+            jsonSchema: { type: "object", properties: {} },
+            execute: (_args, ctx) =>
+              Effect.gen(function* () {
+                yield* ctx.ask({ permission: "asker", metadata: {}, patterns: ["*"], always: ["*"] })
+                return { title: "asker", metadata: {}, output: "done" }
+              }),
+          } satisfies Tool.Def,
+        ]),
+    }),
+  ),
+)
+
+const itAsk = testEffect(askLayer)
+
+itAsk.live("records permission ask wait on the running tool part", () =>
+  Effect.gen(function* () {
+    let state: SessionV1.ToolPart = {
+      id: partID,
+      sessionID,
+      messageID,
+      type: "tool",
+      tool: "asker",
+      callID,
+      state: {
+        status: "running",
+        input: {},
+        time: { start: 100 },
+      },
+    }
+    const processor = {
+      message: {
+        id: messageID,
+        sessionID,
+        role: "assistant",
+        parentID: MessageID.ascending(),
+        agent: "build",
+        mode: "build",
+        path: { cwd: "/tmp", root: "/tmp" },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ModelV2.ID.make("test-model"),
+        providerID: ProviderV2.ID.make("test"),
+        time: { created: 1 },
+      } satisfies SessionV1.Assistant,
+      updateToolCall: (_toolCallID: string, update: (part: SessionV1.ToolPart) => SessionV1.ToolPart) =>
+        Effect.sync(() => {
+          state = update(state)
+          return state
+        }),
+      completeToolCall: () => Effect.void,
+    } satisfies Pick<SessionProcessor.Handle, "message" | "updateToolCall" | "completeToolCall">
+
+    const tools = yield* SessionTools.resolve({
+      agent,
+      model,
+      session: { id: sessionID, permission: [] } as unknown as Session.Info,
+      processor,
+      bypassAgentCheck: false,
+      messages: [],
+      promptOps: {} as never,
+    })
+    const execute = tools.asker.execute
+    if (!execute) throw new Error("asker tool is missing execute")
+
+    yield* Effect.promise(() =>
+      execute(
+        {},
+        {
+          toolCallId: callID,
+          abortSignal: new AbortController().signal,
+          messages: [],
+        },
+      ),
+    )
+
+    expect(state.metadata?.humanWaitMs).toBeGreaterThan(0)
+  }),
+)

@@ -23,6 +23,7 @@ import { Question } from "@/question"
 import { errorMessage } from "@/util/error"
 import { isRecord } from "@/util/record"
 import { EventV2Bridge } from "@/event-v2-bridge"
+import { HumanWait } from "./human-wait"
 import { Database } from "@opencode-ai/core/database/database"
 import { Usage, type LLMEvent } from "@opencode-ai/llm"
 
@@ -174,15 +175,17 @@ const layer = Layer.effect(
           yield* settleToolCall(toolCallID)
           return
         }
+        const end = Date.now()
+        const waited = HumanWait.finalizeWait(match.part, end)
         yield* session.updatePart({
-          ...match.part,
+          ...waited,
           state: {
             status: "completed",
             input: match.part.state.input,
             output: output.output,
             metadata: output.metadata,
             title: output.title,
-            time: { start: match.part.state.time.start, end: Date.now() },
+            time: { start: match.part.state.time.start, end },
             attachments: output.attachments,
           },
         })
@@ -196,15 +199,17 @@ const layer = Layer.effect(
           yield* settleToolCall(toolCallID)
           return false
         }
+        const end = Date.now()
+        const waited = HumanWait.finalizeWait(match.part, end)
         yield* session.updatePart({
-          ...match.part,
+          ...waited,
           state: {
             status: "error",
             input: match.part.state.input,
             error: errorMessage(error),
             // Keep metadata streamed while running so failures retain progress detail (e.g. execute's child calls).
             metadata: match.part.state.metadata,
-            time: { start: match.part.state.time.start, end: Date.now() },
+            time: { start: match.part.state.time.start, end },
           },
         })
         if (error instanceof PermissionV1.RejectedError || error instanceof Question.RejectedError) {
@@ -379,14 +384,27 @@ const layer = Layer.effect(
             }
 
             const agent = yield* agents.get(ctx.assistantMessage.agent)
-            yield* permission.ask({
-              permission: "doom_loop",
-              patterns: [value.name],
-              sessionID: ctx.assistantMessage.sessionID,
-              metadata: { tool: value.name, input },
-              always: [value.name],
-              ruleset: agent.permission,
-            })
+            const start = Date.now()
+            yield* permission
+              .ask({
+                permission: "doom_loop",
+                patterns: [value.name],
+                sessionID: ctx.assistantMessage.sessionID,
+                metadata: { tool: value.name, input },
+                always: [value.name],
+                ruleset: agent.permission,
+              })
+              .pipe(
+                Effect.ensuring(
+                  Effect.suspend(() => {
+                    const waited = Date.now() - start
+                    if (waited <= 0) return Effect.void
+                    return updateToolCall(value.id, (match) =>
+                      match.state.status === "running" ? HumanWait.accumulateWait(match, waited) : match,
+                    ).pipe(Effect.ignore)
+                  }),
+                ),
+              )
             return
           }
 
@@ -612,8 +630,8 @@ const layer = Layer.effect(
         for (const toolCallID of Object.keys(ctx.toolcalls)) {
           const match = yield* readToolCall(toolCallID)
           if (!match) continue
-          const part = match.part
           const end = Date.now()
+          const part = HumanWait.finalizeWait(match.part, end)
           const metadata = "metadata" in part.state && isRecord(part.state.metadata) ? part.state.metadata : {}
           yield* session.updatePart({
             ...part,

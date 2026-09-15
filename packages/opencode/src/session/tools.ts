@@ -24,6 +24,7 @@ import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { isRecord } from "@/util/record"
 import { RuntimeFlags } from "@/effect/runtime-flags"
+import { HumanWait } from "./human-wait"
 
 const MCP_RESOURCE_TOOLS = {
   list: "list_mcp_resources",
@@ -149,15 +150,30 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
           },
         }
       }),
-    ask: (req) =>
-      permission
+    ask: (req) => {
+      const start = Date.now()
+      return permission
         .ask({
           ...req,
           sessionID: input.session.id,
           tool: { messageID: input.processor.message.id, callID: options.toolCallId },
           ruleset: Permission.merge(input.agent.permission, input.session.permission ?? []),
         })
-        .pipe(Effect.orDie),
+        .pipe(
+          Effect.orDie,
+          Effect.ensuring(
+            Effect.suspend(() => {
+              const waited = Date.now() - start
+              if (waited <= 0) return Effect.void
+              return input.processor
+                .updateToolCall(options.toolCallId, (match) =>
+                  match.state.status === "running" ? HumanWait.accumulateWait(match, waited) : match,
+                )
+                .pipe(Effect.ignore)
+            }),
+          ),
+        )
+    },
   })
 
   for (const item of yield* registry.tools({

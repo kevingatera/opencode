@@ -435,6 +435,48 @@ describe("session.message-v2.toModelMessage", () => {
     ])
   })
 
+  test("does not forward internal humanWaitMs part metadata to providers", async () => {
+    const userID = "m-user"
+    const assistantID = "m-assistant"
+
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: assistantInfo(assistantID, userID),
+        parts: [
+          {
+            ...basePart(assistantID, "a1"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "ok",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+            metadata: { openai: { tool: "meta" }, humanWaitMs: 1234 },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const output = JSON.stringify(await MessageV2.toModelMessages(input, model))
+    expect(output).not.toContain("humanWaitMs")
+    expect(output).toContain("openai")
+  })
+
   test("converts recovered task output into assistant text", async () => {
     const userID = "m-user"
     const assistantID = "m-assistant"

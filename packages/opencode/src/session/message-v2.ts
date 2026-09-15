@@ -16,6 +16,7 @@ import {
   User,
   WithParts,
 } from "@opencode-ai/core/v1/session"
+import { HumanWait } from "./human-wait"
 
 import { NamedError } from "@opencode-ai/core/util/error"
 import { APICallError, convertToModelMessages, LoadAPIKeyError, type ModelMessage, type UIMessage } from "ai"
@@ -218,7 +219,9 @@ function hydrate(db: Database.Interface["db"], rows: (typeof MessageTable.$infer
 
 function providerMeta(metadata: Record<string, any> | undefined) {
   if (!metadata) return undefined
-  const { providerExecuted: _, ...rest } = metadata
+  // providerExecuted and humanWaitMs are internal part metadata. Never forward
+  // them as provider call options; unknown options can be rejected by strict providers.
+  const { providerExecuted: _, [HumanWait.HUMAN_WAIT_METADATA_KEY]: __, ...rest } = metadata
   return Object.keys(rest).length > 0 ? rest : undefined
 }
 
