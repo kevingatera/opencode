@@ -21,6 +21,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelRouting } from "@/session/model-routing"
+import { Provider } from "@/provider/provider"
 
 export interface TaskPromptOps {
   cancel(sessionID: SessionID): Effect.Effect<void>
@@ -78,6 +79,14 @@ const BaseParameterFields = {
   directory: Schema.optional(Schema.String).annotate({
     description:
       "Optional working directory for this subagent. Relative paths resolve from the parent session directory. When this differs from other running subagents of the same parent, they are treated as isolated trees (no shared-directory destructive-shell denies).",
+  }),
+  allow_same_model_review: Schema.optional(Schema.Boolean).annotate({
+    description:
+      "Force a separation-role review to run on the writer model. Only applies to model_routing.separation_roles (default review*). The acknowledgement is logged and prepended to the Task result text; prefer a different reviewer model or a per-call model override.",
+  }),
+  model: Schema.optional(Schema.String).annotate({
+    description:
+      'Optional per-call reviewer model override as "provider/model". Still subject to model_routing permitted checks; use it to select an independent reviewer without changing role candidates.',
   }),
 }
 
@@ -275,6 +284,56 @@ export const TaskTool = Tool.define(
         )
       }
 
+      const overrideInput = params.model?.trim() ? params.model.trim() : undefined
+      if (overrideInput && !isValidTaskModelOverride(overrideInput)) {
+        return yield* Effect.fail(
+          new Error(`Invalid model override "${overrideInput}": expected "provider/model".`),
+        )
+      }
+      const overrideModel = parseTaskModelOverride(overrideInput)
+
+      // Reviewer-separation guard at Task-tool admission (legacy SessionPrompt only).
+      // V2 sessions share this id space, but the V2 runner resolves models through
+      // the catalog without consulting routing state, so V2 turns are out of scope.
+      // Preview with auxiliary:true so no child provider pin is written; a match
+      // fails before session creation. A forced match keeps running and its
+      // acknowledgement is prepended to the Task result text below (plus the log).
+      let forcedSeparationAck: string | undefined
+      if (!isExemptSeparationRole(next.name) && isSeparationRole(next.name, separationRolePatterns(cfg))) {
+        const writerMsg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
+          Effect.provideService(Database.Service, database),
+          Effect.orDie,
+        )
+        if (writerMsg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
+        const writer = { providerID: writerMsg.info.providerID, modelID: writerMsg.info.modelID }
+        const base = overrideModel ?? next.model ?? writer
+        const configured = cfg.model_routing?.roles?.[next.name]
+        if (!configured || configured.length === 0) {
+          yield* Effect.logWarning(reviewerUnconfiguredMessage({ role: next.name, writer }))
+        } else {
+          const preview = yield* routing
+            .resolve({ sessionID: ctx.sessionID, role: next.name, model: base, auxiliary: true })
+            .pipe(Effect.exit)
+          if (Exit.isSuccess(preview)) {
+            const resolved = preview.value
+            const sameModel = resolved.providerID === writer.providerID && resolved.modelID === writer.modelID
+            if (sameModel) {
+              if (params.allow_same_model_review === true) {
+                forcedSeparationAck = reviewerForcedMessage({ role: next.name, writer })
+                yield* Effect.logWarning(forcedSeparationAck)
+              } else {
+                const resolvedName = formatReviewerModel(resolved)
+                const fallback = !configured.includes(resolvedName) && !configured.includes("session")
+                const alternatives =
+                  configured.filter((candidate) => candidate !== resolvedName).join(", ") ||
+                  "none configured on a different model"
+                return yield* Effect.fail(new Error(reviewerBlockMessage({ role: next.name, resolvedName, writer, fallback, alternatives })))
+              }
+            }
+          }
+        }
+      }
+
       const jobs = yield* background.list()
       const directory = resolveTaskDirectory((yield* InstanceState.context).directory, params.directory)
       const siblingShared = siblingSharesDirectory({
@@ -343,12 +402,12 @@ export const TaskTool = Tool.define(
         sessionID: nextSession.id,
         role: next.name,
         model: {
-          modelID: next.model?.modelID ?? msg.info.modelID,
-          providerID: next.model?.providerID ?? msg.info.providerID,
+          modelID: overrideModel?.modelID ?? next.model?.modelID ?? msg.info.modelID,
+          providerID: overrideModel?.providerID ?? next.model?.providerID ?? msg.info.providerID,
         },
       })
       const taskVariant =
-        next.model || model.providerID !== msg.info.providerID || model.modelID !== msg.info.modelID
+        overrideModel || next.model || model.providerID !== msg.info.providerID || model.modelID !== msg.info.modelID
           ? undefined
           : variant
       const resumed = !!session
@@ -434,7 +493,7 @@ export const TaskTool = Tool.define(
                     state === "completed"
                       ? `Background task completed: ${params.description}`
                       : `Background task failed: ${params.description}`,
-                  text,
+                  text: withForcedSeparationAck(text, forcedSeparationAck),
                 }),
               },
             ],
@@ -465,7 +524,7 @@ export const TaskTool = Tool.define(
           output: taskOutput({
             state: "running",
             summary: "Background task updated",
-            text: BACKGROUND_UPDATED,
+            text: withForcedSeparationAck(BACKGROUND_UPDATED, forcedSeparationAck),
           }),
         }
       }
@@ -496,7 +555,7 @@ export const TaskTool = Tool.define(
           output: taskOutput({
             state: "running",
             summary: "Background task started",
-            text: BACKGROUND_STARTED,
+            text: withForcedSeparationAck(BACKGROUND_STARTED, forcedSeparationAck),
           }),
         }
       }
@@ -529,7 +588,10 @@ export const TaskTool = Tool.define(
             return {
               title: params.description,
               metadata,
-              output: taskOutput({ state: "completed", text: result?.output ?? "" }),
+              output: taskOutput({
+                state: "completed",
+                text: withForcedSeparationAck(result?.output ?? "", forcedSeparationAck),
+              }),
             }
           }),
         (_, exit) =>
@@ -562,3 +624,78 @@ export const TaskTool = Tool.define(
     }
   }),
 )
+
+function isExemptSeparationRole(role: string) {
+  return role === "title" || role === "summary" || role === "compaction"
+}
+
+function matchesSeparationGlob(pattern: string, value: string) {
+  const escaped = pattern
+    .split("*")
+    .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*")
+  return new RegExp(`^${escaped}$`).test(value)
+}
+
+function isSeparationRole(role: string, patterns: readonly string[]) {
+  return patterns.some((pattern) => matchesSeparationGlob(pattern, role))
+}
+
+function separationRolePatterns(cfg: unknown): string[] {
+  if (!cfg || typeof cfg !== "object" || !("model_routing" in cfg)) return ["review*"]
+  const routing = (cfg as { model_routing?: unknown }).model_routing
+  if (!routing || typeof routing !== "object" || !("separation_roles" in routing)) return ["review*"]
+  const roles = (routing as { separation_roles?: unknown }).separation_roles
+  if (!Array.isArray(roles)) return ["review*"]
+  const cleaned = roles.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+  if (cleaned.length === 0) return ["review*"]
+  return cleaned
+}
+
+function parseTaskModelOverride(input: string | undefined) {
+  if (!input) return undefined
+  return Provider.parseModel(input)
+}
+
+function isValidTaskModelOverride(input: string | undefined) {
+  if (!input) return true
+  return input.includes("/") && !input.startsWith("/") && !input.endsWith("/")
+}
+
+function formatReviewerModel(input: { providerID: string; modelID: string }) {
+  return `${input.providerID}/${input.modelID}`
+}
+
+function reviewerBlockMessage(input: {
+  role: string
+  resolvedName: string
+  writer: { providerID: string; modelID: string }
+  fallback: boolean
+  alternatives: string
+}) {
+  const fallbackMark = input.fallback ? " (anchor fallback)" : ""
+  return [
+    `Reviewer separation: role "${input.role}" resolved to ${input.resolvedName}${fallbackMark}, which matches the writer model ${formatReviewerModel(input.writer)}.`,
+    `Independent review requires a different model. Permitted alternatives (in order): ${input.alternatives}.`,
+    `Retry with model="provider/model" for an independent reviewer, or force with allow_same_model_review=true.`,
+  ].join(" ")
+}
+
+function reviewerForcedMessage(input: {
+  role: string
+  writer: { providerID: string; modelID: string }
+}) {
+  return `Reviewer separation forced: role "${input.role}" running on writer model ${formatReviewerModel(input.writer)} with allow_same_model_review=true. Independent review is bypassed.`
+}
+
+function reviewerUnconfiguredMessage(input: {
+  role: string
+  writer: { providerID: string; modelID: string }
+}) {
+  return `Reviewer separation: role "${input.role}" has no configured candidates; proceeding with writer model ${formatReviewerModel(input.writer)}. Configure model_routing.roles["${input.role}"] or separation_roles to enforce independent review.`
+}
+
+function withForcedSeparationAck(text: string, ack: string | undefined) {
+  if (!ack) return text
+  return `${ack}\n\n${text}`
+}

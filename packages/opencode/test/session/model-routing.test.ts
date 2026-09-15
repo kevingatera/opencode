@@ -213,21 +213,31 @@ it.instance(
   { config },
 )
 
-for (const role of ["nongpt", "empty"]) {
-  it.instance(
-    `routing rejects ${role} without an unrelated model fallback`,
-    () =>
-      Effect.gen(function* () {
-        const routing = yield* ModelRouting.Service
-        const sessions = yield* Session.Service
-        const root = yield* sessions.create({ title: "Root" })
-        const result = yield* routing.resolve({ sessionID: root.id, role, model: a }).pipe(Effect.exit)
-        expect(Exit.isFailure(result)).toBe(true)
-        if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toContain("no fallback was used")
-      }),
-    { config },
-  )
-}
+it.instance(
+  "routing rejects nongpt without an unrelated model fallback",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root" })
+      const result = yield* routing.resolve({ sessionID: root.id, role: "nongpt", model: a }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toContain("no fallback was used")
+    }),
+  { config },
+)
+
+it.instance(
+  "empty candidate list behaves like a missing role and follows the anchor branch",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root" })
+      expect(yield* routing.resolve({ sessionID: root.id, role: "empty", model: a })).toMatchObject(a)
+    }),
+  { config },
+)
 
 const fallbackConfig: Config.Info = {
   ...config,
@@ -397,7 +407,7 @@ it.instance(
       const text = yield* routing.command({ sessionID: child.id, action: "curated", model: b })
       expect(text).toContain("general: route-a/claude")
       expect(text).toContain("candidates (in order): missing/claude -> route-b/claude -> route-a/claude")
-      expect(text).toContain("empty: unavailable")
+      expect(text).toContain("empty: route-a/claude")
       const storage = yield* Storage.Service
       expect(yield* storage.read(["model_routing", root.id])).toMatchObject({ pins: {} })
       expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: b })).toMatchObject(a)

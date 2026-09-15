@@ -1709,4 +1709,442 @@ describe("tool.task", () => {
       expect((yield* jobs.get(grandchild.id))?.status).toBe("cancelled")
     }),
   )
+
+  it.instance(
+    "reviewer separation blocks same-model review without creating a session",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            { description: "review change", prompt: "review this", subagent_type: "reviewer" },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("Reviewer separation")
+          expect(Cause.pretty(exit.cause)).toContain('role "reviewer"')
+          expect(Cause.pretty(exit.cause)).toContain("test/test-model")
+          expect(Cause.pretty(exit.cause)).toContain("Permitted alternatives")
+        }
+        expect(calls).toBe(0)
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation passes when the reviewer resolves to a different model",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.metadata.subagentType).toBe("reviewer")
+        expect(result.metadata.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(seen?.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["other/gpt"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation force flag executes with an acknowledgement",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const result = yield* def.execute(
+          {
+            description: "review change",
+            prompt: "review this",
+            subagent_type: "reviewer",
+            allow_same_model_review: true,
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.subagentType).toBe("reviewer")
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(result.output).toContain("Reviewer separation forced")
+        expect(result.output).toContain("allow_same_model_review=true")
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation per-call model override selects an independent reviewer",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer", model: "other/gpt" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.metadata.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(seen?.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["session"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation warns and proceeds when the review role is unconfigured",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const result = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.subagentType).toBe("reviewer")
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { general: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation warns and executes when candidates are an empty list",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const result = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.subagentType).toBe("reviewer")
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: [] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation exempts compaction and non-separation roles",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+        const context = {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        }
+
+        const compacted = yield* def.execute(
+          { description: "compact this", prompt: "compact", subagent_type: "compaction" },
+          context,
+        )
+        expect(compacted.metadata.subagentType).toBe("compaction")
+
+        const general = yield* def.execute(
+          { description: "research this", prompt: "research", subagent_type: "general" },
+          context,
+        )
+        expect(general.metadata.subagentType).toBe("general")
+        expect(calls).toBe(2)
+      }),
+    {
+      config: () => ({
+        model_routing: {
+          scope: "curated",
+          separation_roles: ["compaction"],
+          roles: { compaction: ["test/test-model"], general: ["test/test-model"] },
+        },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation leaves no pin behind so a forced retry succeeds",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const context = {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps() },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        }
+
+        const blocked = yield* def
+          .execute({ description: "review change", prompt: "review this", subagent_type: "reviewer" }, context)
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(blocked)).toBe(true)
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+
+        const retried = yield* def.execute(
+          {
+            description: "review change",
+            prompt: "review this",
+            subagent_type: "reviewer",
+            allow_same_model_review: true,
+          },
+          context,
+        )
+        expect(retried.metadata.subagentType).toBe("reviewer")
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation re-evaluates resumed tasks instead of skipping the check",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+        const context = {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        }
+
+        const first = yield* def.execute(
+          {
+            description: "review change",
+            prompt: "review this",
+            subagent_type: "reviewer",
+            allow_same_model_review: true,
+          },
+          context,
+        )
+        expect(calls).toBe(1)
+
+        const resumed = yield* def
+          .execute({ description: "follow up", prompt: "check again", task_id: first.metadata.sessionId }, context)
+          .pipe(Effect.exit)
+        expect(Exit.isFailure(resumed)).toBe(true)
+        if (Exit.isFailure(resumed)) expect(Cause.pretty(resumed.cause)).toContain("Reviewer separation")
+        expect(calls).toBe(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
 })

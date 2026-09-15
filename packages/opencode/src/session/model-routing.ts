@@ -122,11 +122,16 @@ const layer = Layer.effect(
       // The literal "session" candidate means "whatever this session is
       // currently running" — callers pass the live model as input.model, so
       // it participates in the same permitted checks as any other candidate.
-      const candidates = state.roles[input.role]?.map((candidate) =>
-        candidate === "session" ? input.model : Provider.parseModel(candidate),
-      ) ?? [
-        !session.parentID && !input.auxiliary ? input.model : state.anchor,
-      ]
+      // An empty candidate list behaves like a missing role and falls back to
+      // the anchor branch below, so warn-proceed guards and downstream
+      // resolution agree instead of failing closed on [].
+      const roleCandidates = state.roles[input.role]
+      const hasRoleCandidates = Array.isArray(roleCandidates) && roleCandidates.length > 0
+      const candidates = hasRoleCandidates
+        ? roleCandidates.map((candidate) =>
+            candidate === "session" ? input.model : Provider.parseModel(candidate),
+          )
+        : [!session.parentID && !input.auxiliary ? input.model : state.anchor]
       const permitted = (candidate: Model) =>
         (state.scope !== "same" || candidate.providerID === state.anchor.providerID) &&
         (!pin || candidate.providerID === pin) &&
@@ -141,7 +146,7 @@ const layer = Layer.effect(
         !selected &&
         state.scope === "same" &&
         state.anchor_fallback === true &&
-        Boolean(state.roles[input.role]) &&
+        hasRoleCandidates &&
         (!pin || pin === state.anchor.providerID) &&
         permitted(state.anchor)
       return { selected: selected ?? (anchorFallback ? state.anchor : undefined), candidates, pin, anchorFallback: !selected && anchorFallback }
@@ -151,10 +156,13 @@ const layer = Layer.effect(
       const loaded = yield* load(input.sessionID, input.model)
       if (!loaded) return input.model
       const { state, session, root, key } = loaded
+      const configuredCandidates = state.roles[input.role]
+      const hasConfiguredCandidates =
+        Array.isArray(configuredCandidates) && configuredCandidates.length > 0
       if (
         !session.parentID &&
         !input.auxiliary &&
-        !Object.hasOwn(state.roles, input.role) &&
+        !hasConfiguredCandidates &&
         state.scope === "same" &&
         input.model.providerID !== state.anchor.providerID
       ) {

@@ -11,6 +11,10 @@ export const Info = Schema.Struct({
   // provider runs the anchor model instead of failing. Default keeps the
   // fail-closed contract for deliberate model choices.
   anchor_fallback: Schema.optional(Schema.Boolean),
+  // Glob patterns (default ["review*"]) selecting roles that require an
+  // independent reviewer model at Task-tool admission. Preview resolution uses
+  // auxiliary mode so no child provider pin is written before the check.
+  separation_roles: Schema.optional(Schema.Array(Schema.String)),
   // Candidates are "provider/model" strings, or the literal "session" meaning
   // "whatever the session is currently running" (subject to the same
   // permitted checks; a later candidate takes over when it is not permitted).
