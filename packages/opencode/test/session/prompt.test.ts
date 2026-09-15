@@ -632,6 +632,67 @@ it.instance("routing applies to the actual compaction provider call", () =>
   }),
 )
 
+it.instance("pending compaction task compacts via auxiliary routing when the main model is outside the anchor", () =>
+  Effect.gen(function* () {
+    const routeA = {
+      providerID: ProviderV2.ID.make("route-a"),
+      modelID: ModelV2.ID.make("claude"),
+    }
+    const routeB = {
+      providerID: ProviderV2.ID.make("route-b"),
+      modelID: ModelV2.ID.make("claude"),
+    }
+    const routeProvider = (url: string, name: string) => ({
+      ...cfg.provider.test,
+      name,
+      id: name,
+      models: {
+        claude: {
+          ...cfg.provider.test.models["test-model"],
+          id: "claude",
+          name: "Claude",
+        },
+      },
+      options: {
+        ...cfg.provider.test.options,
+        baseURL: url,
+      },
+    })
+    const { llm } = yield* useServerConfig((url) => ({
+      provider: {
+        "route-a": routeProvider(url, "route-a"),
+        "route-b": routeProvider(url, "route-b"),
+      },
+      model_routing: { scope: "same", roles: { compaction: ["route-a/claude"] } },
+    }))
+    const prompt = yield* SessionPrompt.Service
+    const sessions = yield* Session.Service
+    const compaction = yield* SessionCompaction.Service
+    const chat = yield* sessions.create({
+      title: "Pinned",
+      model: { providerID: routeA.providerID, id: routeA.modelID },
+    })
+    yield* prompt.prompt({
+      sessionID: chat.id,
+      agent: "build",
+      model: routeA,
+      noReply: true,
+      parts: [{ type: "text", text: "hello" }],
+    })
+    yield* compaction.create({ sessionID: chat.id, agent: "build", model: routeB, auto: false })
+    yield* llm.push(reply().text("Compacted summary").stop())
+    yield* prompt.loop({ sessionID: chat.id })
+    expect((yield* llm.hits).map((hit) => hit.body.model)).toEqual(["claude"])
+    expect(JSON.stringify((yield* llm.hits)[0]?.body)).not.toContain("Legacy model routing")
+    expect((yield* sessions.messages({ sessionID: chat.id })).at(-1)?.info).toMatchObject({
+      role: "assistant",
+      summary: true,
+      providerID: routeA.providerID,
+      modelID: routeA.modelID,
+    })
+  }),
+)
+
 noLLMServer.instance("prompt without agent preserves the child session agent", () =>
   Effect.gen(function* () {
     const prompt = yield* SessionPrompt.Service

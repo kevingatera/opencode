@@ -1277,7 +1277,15 @@ const layer = Layer.effect(
               history: msgs,
             }).pipe(Effect.ignore, Effect.forkIn(scope))
 
-          const routed = yield* routing.resolve({ sessionID, role: lastUser.agent, model: lastUser.model })
+          const nextTask = tasks.at(-1)
+          const isCompactionTurn = nextTask?.type === "compaction"
+          const compactionAgent = isCompactionTurn ? yield* agents.get("compaction") : undefined
+          const routed = yield* routing.resolve({
+            sessionID,
+            role: compactionAgent?.name ?? lastUser.agent,
+            model: compactionAgent?.model ?? lastUser.model,
+            auxiliary: isCompactionTurn,
+          })
           const model = yield* getModel(routed.providerID, routed.modelID, sessionID)
           const task = tasks.pop()
 
