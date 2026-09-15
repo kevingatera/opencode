@@ -2361,4 +2361,53 @@ describe("run stream transport", () => {
       await transport.close()
     }
   })
+
+  test("runPromptTurn returns the human wait recorded during the turn", async () => {
+    const src = eventFeed()
+    const ui = footer()
+    const transport = await createSessionTransport({
+      sdk: sdk({
+        stream: src.stream,
+        promptAsync: async () => {
+          queueMicrotask(() => {
+            src.push(busy())
+            src.push(
+              toolUpdated({
+                ...completedTool({
+                  sessionID: "session-1",
+                  messageID: "msg-1",
+                  id: "part-1",
+                  callID: "call-1",
+                  tool: "bash",
+                  body: {},
+                }),
+                metadata: { humanWaitMs: 45000 },
+              }),
+            )
+            src.push(idle())
+          })
+          return ok(undefined)
+        },
+      }),
+      sessionID: "session-1",
+      thinking: true,
+      limits: () => ({}),
+      footer: ui.api,
+    })
+
+    try {
+      const result = await transport.runPromptTurn({
+        agent: undefined,
+        model: undefined,
+        variant: undefined,
+        prompt: { text: "hello", parts: [] },
+        files: [],
+        includeFiles: false,
+      })
+      expect(result).toEqual({ waitedMs: 45000 })
+    } finally {
+      src.close()
+      await transport.close()
+    }
+  })
 })

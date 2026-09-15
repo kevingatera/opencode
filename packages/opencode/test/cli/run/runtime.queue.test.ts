@@ -223,6 +223,45 @@ describe("run runtime queue", () => {
     expect(ui.events.some((event) => event.type === "turn.duration")).toBe(false)
   })
 
+  test("subtracts recorded human wait from the turn duration", async () => {
+    const ui = footer()
+
+    const task = runPromptQueue({
+      footer: ui.api,
+      run: async () => {
+        ui.api.close()
+        return { waitedMs: 60_000 }
+      },
+    })
+
+    ui.submit("hello")
+    await task
+
+    const duration = ui.events.find((event) => event.type === "turn.duration")
+    expect(duration).toEqual({ type: "turn.duration", duration: "0ms" })
+  })
+
+  test("keeps wall clock when the turn reports no recorded wait", async () => {
+    const ui = footer()
+
+    const task = runPromptQueue({
+      footer: ui.api,
+      run: async () => {
+        ui.api.close()
+      },
+    })
+
+    ui.submit("hello")
+    await task
+
+    const duration = ui.events.find((event) => event.type === "turn.duration")
+    expect(duration?.type).toBe("turn.duration")
+    if (duration?.type === "turn.duration") {
+      expect(typeof duration.duration).toBe("string")
+      expect(duration.duration.length).toBeGreaterThan(0)
+    }
+  })
+
   test("preserves whitespace for initial input", async () => {
     const ui = footer()
     const seen: string[] = []

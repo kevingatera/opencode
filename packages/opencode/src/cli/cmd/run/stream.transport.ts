@@ -57,6 +57,7 @@ import type {
   RunPrompt,
   RunPromptPart,
   RunProvider,
+  RunTurnResult,
   StreamCommit,
 } from "./types"
 
@@ -100,7 +101,7 @@ export type SessionTurnInput = {
 }
 
 export type SessionTransport = {
-  runPromptTurn(input: SessionTurnInput): Promise<void>
+  runPromptTurn(input: SessionTurnInput): Promise<RunTurnResult>
   selectSubagent(sessionID: string | undefined): void
   replayOnResize(input: SessionResizeReplayInput): Promise<boolean>
   close(): Promise<void>
@@ -124,7 +125,7 @@ type State = {
 }
 
 type TransportService = {
-  readonly runPromptTurn: (input: SessionTurnInput) => Effect.Effect<void, unknown>
+  readonly runPromptTurn: (input: SessionTurnInput) => Effect.Effect<RunTurnResult, unknown>
   readonly selectSubagent: (sessionID: string | undefined) => Effect.Effect<void>
   readonly replayOnResize: (input: SessionResizeReplayInput) => Effect.Effect<boolean>
   readonly close: () => Effect.Effect<void>
@@ -1186,17 +1187,17 @@ function createLayer(input: StreamInput) {
 
         const runPromptTurn = Effect.fn("RunStreamTransport.runPromptTurn")(function* (next: SessionTurnInput) {
           if (closed || next.signal?.aborted || input.footer.isClosed) {
-            return
+            return { waitedMs: 0 }
           }
 
           if (state.fault) {
             yield* Effect.fail(state.fault)
-            return
+            return { waitedMs: 0 }
           }
 
           if (state.wait) {
             yield* Effect.fail(new Error("prompt already running"))
-            return
+            return { waitedMs: 0 }
           }
 
           const item: Wait = {
@@ -1208,6 +1209,7 @@ function createLayer(input: StreamInput) {
           }
           state.wait = item
           state.data.announced = false
+          state.data.turnWaitedMs = 0
 
           const turn = new AbortController()
           const stop = () => {
@@ -1406,7 +1408,7 @@ function createLayer(input: StreamInput) {
               }),
             ),
           )
-          return
+          return { waitedMs: state.data.turnWaitedMs }
         })
 
         const selectSubagent = Effect.fn("RunStreamTransport.selectSubagent")((sessionID: string | undefined) =>

@@ -65,6 +65,7 @@ type SessionCommit = StreamCommit
 // - end:    part IDs whose time.end has arrived (part is finished)
 // - shell:  shell call ID → chosen transcript source for direct shell calls
 // - echo:   message ID → bash outputs to strip from the next assistant chunk
+// - turn:   human-wait ms accumulated from tool parts completed this turn
 type ShellCall = {
   source: "shell" | "tool"
   command?: string
@@ -87,6 +88,7 @@ export type SessionData = {
   visible: Map<string, string>
   end: Set<string>
   echo: Map<string, Set<string>>
+  turnWaitedMs: number
 }
 
 export type SessionDataInput = {
@@ -125,6 +127,7 @@ export function createSessionData(
     visible: new Map(),
     end: new Set(),
     echo: new Map(),
+    turnWaitedMs: 0,
   }
 }
 
@@ -417,6 +420,14 @@ function toolStatus(part: ToolPart): string {
   }
 
   return "running task"
+}
+
+// Human-wait ms the server recorded on a tool part (permission/question
+// blocked time). Read once at the terminal update so redelivered events
+// behind the ids dedup guard never double count.
+function toolHumanWaitMs(part: ToolPart): number {
+  const value = (part.metadata as Dict | undefined)?.humanWaitMs
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0
 }
 
 // Returns true if we can flush this part's text to scrollback.
@@ -956,6 +967,7 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
         }
 
         data.ids.add(part.id)
+        data.turnWaitedMs += toolHumanWaitMs(part)
         stashEcho(data, part)
 
         const output = part.state.output
@@ -992,6 +1004,7 @@ export function reduceSessionData(input: SessionDataInput): SessionDataOutput {
         }
 
         data.ids.add(part.id)
+        data.turnWaitedMs += toolHumanWaitMs(part)
         const text =
           typeof part.state.error === "string" && part.state.error.trim() ? part.state.error : "unknown error"
         commits.push(failTool(part, text))

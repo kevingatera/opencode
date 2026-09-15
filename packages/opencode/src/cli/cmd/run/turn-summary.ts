@@ -36,12 +36,23 @@ export function messageTurnSummaryCommit(
     return
   }
 
+  let waited = 0
+  for (const part of message.parts) {
+    if (part.type !== "tool" || part.state.status === "pending") continue
+    const value = part.metadata?.humanWaitMs
+    if (typeof value === "number") waited += value
+  }
+  const elapsed = completed - info.time.created - waited
+  if (elapsed <= 0) {
+    return
+  }
+
   const model = providers?.find((item) => item.id === info.providerID)?.models[info.modelID]?.name
 
   return turnSummaryCommit({
     agent: Locale.titlecase(info.agent),
     model: model ?? info.modelID,
-    duration: Locale.duration(completed - info.time.created),
+    duration: Locale.duration(elapsed),
     messageID: info.id,
   })
 }

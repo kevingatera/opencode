@@ -111,6 +111,64 @@ function tool(input: { id: string; messageID: string; tool: string; state: Recor
 }
 
 describe("run session data", () => {
+  test("accumulates recorded human wait when a tool part completes", () => {
+    const data = createSessionData()
+    reduce(data, assistant("msg-1"))
+    reduce(data, {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-1",
+          messageID: "msg-1",
+          sessionID: "session-1",
+          type: "tool",
+          tool: "bash",
+          callID: "call-1",
+          metadata: { humanWaitMs: 45000 },
+          state: {
+            status: "completed",
+            input: {},
+            output: "",
+            title: "Bash",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        },
+      },
+    })
+    expect(data.turnWaitedMs).toBe(45000)
+  })
+
+  test("ignores the same completed tool part on redelivery", () => {
+    const data = createSessionData()
+    reduce(data, assistant("msg-1"))
+    const event = {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "part-1",
+          messageID: "msg-1",
+          sessionID: "session-1",
+          type: "tool",
+          tool: "bash",
+          callID: "call-1",
+          metadata: { humanWaitMs: 45000 },
+          state: {
+            status: "completed",
+            input: {},
+            output: "",
+            title: "Bash",
+            metadata: {},
+            time: { start: 1, end: 2 },
+          },
+        },
+      },
+    }
+    reduce(data, event)
+    reduce(data, event)
+    expect(data.turnWaitedMs).toBe(45000)
+  })
+
   test("buffers delayed assistant text until the role is known", () => {
     let data = createSessionData()
     data = reduce(data, delta("msg-1", "txt-1", "hello")).data

@@ -670,7 +670,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         : undefined,
       run: async (prompt, signal) => {
         if (state.demo && (await state.demo.prompt(prompt, signal))) {
-          return
+          return { waitedMs: 0 }
         }
 
         await state.switching?.catch(() => {})
@@ -678,7 +678,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
         let outputAnchor: LocalReplayAnchor | undefined
         try {
           const next = await ensureStream()
-          await next.handle.runPromptTurn({
+          const result = await next.handle.runPromptTurn({
             agent: state.agent,
             model: state.model,
             variant: state.activeVariant,
@@ -696,9 +696,10 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
             )
           }
           includeFiles = false
+          return result
         } catch (error) {
           if (signal.aborted || footer.isClosed) {
-            return
+            return { waitedMs: 0 }
           }
 
           const text =
@@ -713,6 +714,7 @@ async function runInteractiveRuntime(input: RunRuntimeInput, deps: RunRuntimeDep
           } as const
           rememberLocal(commit, outputAnchor)
           footer.append(commit)
+          return { waitedMs: 0 }
         }
       },
     })

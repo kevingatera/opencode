@@ -103,6 +103,13 @@ export type TurnSummary = {
   duration: string
 }
 
+// Outcome of one drained prompt turn. waitedMs is the human-wait
+// (permission/question) time recorded on the turn's tool parts; the queue
+// subtracts it from wall clock so the live duration matches replay.
+export type RunTurnResult = {
+  waitedMs: number
+}
+
 export type ScrollbackOptions = {
   diffStyle?: RunDiffStyle
   suppressBackgrounds?: boolean

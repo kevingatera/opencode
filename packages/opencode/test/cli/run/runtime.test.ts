@@ -230,7 +230,7 @@ describe("run interactive runtime", () => {
               input.footer.close()
             }, 0)
             return {
-              runPromptTurn: async () => {},
+              runPromptTurn: async () => ({ waitedMs: 0 }),
               selectSubagent: () => {},
               replayOnResize: async () => false,
               close: async () => {},
@@ -315,7 +315,7 @@ describe("run interactive runtime", () => {
         }),
         streamTransport: Promise.resolve({
           createSessionTransport: async () => ({
-            runPromptTurn: async () => {},
+            runPromptTurn: async () => ({ waitedMs: 0 }),
             selectSubagent: (sessionID) => {
               selected.push(sessionID)
             },

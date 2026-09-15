@@ -5,13 +5,14 @@
 // an active ordinary turn are exposed for edit/removal until they begin.
 //
 // The queue also handles /exit, /quit, and /new commands, empty-prompt rejection,
-// and tracks per-turn wall-clock duration for the footer status line.
+// and tracks per-turn duration for the footer status line (wall clock minus
+// recorded human-wait time so the statusline matches replay).
 //
 // Resolves when the footer closes and all in-flight work finishes.
 import * as Locale from "@/util/locale"
 import { MessageID, PartID } from "@/session/schema"
 import { isExitCommand, isNewCommand } from "./prompt.shared"
-import type { FooterApi, FooterEvent, FooterQueuedPrompt, RunPrompt } from "./types"
+import type { FooterApi, FooterEvent, FooterQueuedPrompt, RunPrompt, RunTurnResult } from "./types"
 
 type Trace = {
   write(type: string, data?: unknown): void
@@ -29,7 +30,10 @@ export type QueueInput = {
   trace?: Trace
   onSend?: (prompt: RunPrompt) => void
   onNewSession?: () => void | Promise<void>
-  run: (prompt: RunPrompt, signal: AbortSignal) => Promise<void>
+  // Resolves with the turn outcome when known. Implementations that predate
+  // human-wait tracking may resolve with undefined; the queue treats that as
+  // zero recorded wait.
+  run: (prompt: RunPrompt, signal: AbortSignal) => Promise<RunTurnResult | void>
 }
 
 type State = {
@@ -185,6 +189,7 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
           const start = Date.now()
           const ctrl = new AbortController()
           state.ctrl = ctrl
+          let waitedMs = 0
 
           try {
             await input.footer.idle()
@@ -210,7 +215,10 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
             }
 
             const task = input.run(sent, ctrl.signal).then(
-              () => ({ type: "done" as const }),
+              (result) => ({
+                type: "done" as const,
+                waitedMs: typeof result?.waitedMs === "number" ? result.waitedMs : 0,
+              }),
               (error) => ({ type: "error" as const, error }),
             )
 
@@ -218,6 +226,10 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
             if (next.type === "closed") {
               ctrl.abort()
               break
+            }
+
+            if (next.type === "done") {
+              waitedMs = next.waitedMs
             }
 
             if (next.type === "error") {
@@ -229,7 +241,7 @@ export async function runPromptQueue(input: QueueInput): Promise<void> {
             }
 
             if (sent.mode !== "shell") {
-              const duration = Locale.duration(Math.max(0, Date.now() - start))
+              const duration = Locale.duration(Math.max(0, Date.now() - start - waitedMs))
               emit(
                 {
                   type: "turn.duration",
