@@ -32,6 +32,10 @@ export const Input = Schema.Struct({
     .annotate({
       description: `Timeout in milliseconds. Defaults to ${DEFAULT_TIMEOUT_MS} and may not exceed ${MAX_TIMEOUT_MS}.`,
     }),
+  reason: Schema.String.pipe(Schema.optional).annotate({
+    description:
+      "One sentence stating what the command does and why. Include it whenever the command may trigger a user approval prompt, such as pushes, PR creation, deletes, package installs, or infrastructure writes.",
+  }),
 })
 
 const StructuredOutput = Schema.Struct({
@@ -107,7 +111,7 @@ const layer = Layer.effectDiscard(
     yield* tools
       .register({
         [name]: Tool.make({
-          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows.`,
+          description: `Execute one shell command string with the host user's filesystem, process, and network authority. The active Location is the default working directory. Relative workdir values resolve from that Location. External workdir values require external_directory approval; best-effort command-argument path warnings are advisory only. Timeout values are milliseconds (default: ${DEFAULT_TIMEOUT_MS}; maximum: ${MAX_TIMEOUT_MS}). Uses the configured shell when set; otherwise uses /bin/sh on POSIX and COMSPEC or cmd.exe on Windows. Include reason — a single plain sentence stating what the command does and why — whenever the command may trigger a user approval prompt, such as pushes, PR creation, deletes, package installs, or infrastructure writes.`,
           input: Input,
           output: Output,
           structured: StructuredOutput,
@@ -145,6 +149,7 @@ const layer = Layer.effectDiscard(
                 action: name,
                 resources: [input.command],
                 save: prefix.length ? [`${prefix.join(" ")} *`] : [input.command],
+                metadata: input.reason === undefined ? undefined : { reason: input.reason },
                 sessionID: context.sessionID,
                 agent: context.agent,
                 source,

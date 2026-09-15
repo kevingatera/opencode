@@ -992,10 +992,12 @@ function permList(p: ToolPermissionProps): ToolPermissionInfo {
 
 function permBash(p: ToolPermissionProps<typeof BashTool>): ToolPermissionInfo {
   const cmd = p.input.command || ""
+  const reason = text(dict(p.metadata).reason)
+  const lines = cmd ? [`$ ${cmd}`] : p.patterns.map((item) => `- ${item}`)
   return {
     icon: "#",
     title: "Shell command",
-    lines: cmd ? [`$ ${cmd}`] : p.patterns.map((item) => `- ${item}`),
+    lines: reason ? [`◉ ${reason}`, ...lines] : lines,
   }
 }
 

@@ -85,6 +85,43 @@ describe("run permission shared", () => {
     })
   })
 
+  test("renders the bash reason line above the command when metadata carries one", () => {
+    expect(
+      permissionInfo(
+        req({
+          permission: "bash",
+          metadata: {
+            reason: "Push the reviewed release commit to origin",
+            input: {
+              command: "git push origin release",
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      title: "Shell command",
+      lines: ["◉ Push the reviewed release commit to origin", "$ git push origin release"],
+    })
+  })
+
+  test("omits the bash reason line when metadata has none", () => {
+    expect(
+      permissionInfo(
+        req({
+          permission: "bash",
+          metadata: {
+            input: {
+              command: "git status --short",
+            },
+          },
+        }),
+      ),
+    ).toMatchObject({
+      title: "Shell command",
+      lines: ["$ git status --short"],
+    })
+  })
+
   test("maps supported permission types into display info", () => {
     expect(
       permissionInfo(
