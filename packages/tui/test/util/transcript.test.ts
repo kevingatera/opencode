@@ -104,6 +104,35 @@ describe("transcript", () => {
       const result = formatAssistantHeader(msg, true)
       expect(result).toContain("Plan")
     })
+
+    test("subtracts recorded human wait from the duration", () => {
+      const parts: Part[] = [
+        {
+          id: "part_1",
+          sessionID: "ses_123",
+          messageID: "msg_123",
+          type: "tool",
+          callID: "call_1",
+          tool: "question",
+          state: {
+            status: "completed",
+            input: {},
+            output: "answer",
+            title: "Question",
+            metadata: {},
+            time: { start: 1000000, end: 1005000 },
+          },
+          metadata: { humanWaitMs: 4000 },
+        },
+      ]
+      const result = formatAssistantHeader(baseMsg, true, providers, parts)
+      expect(result).toBe("## Assistant (Build · Claude Sonnet 4 · 1.4s)\n\n")
+    })
+
+    test("keeps the full duration when no wait is recorded", () => {
+      const result = formatAssistantHeader(baseMsg, true, providers, [])
+      expect(result).toBe("## Assistant (Build · Claude Sonnet 4 · 5.4s)\n\n")
+    })
   })
 
   describe("formatPart", () => {
@@ -291,6 +320,44 @@ describe("transcript", () => {
       const result = formatMessage(msg, parts, options)
       expect(result).toContain("## Assistant (Build · Claude Sonnet 4 · 5.4s)")
       expect(result).toContain("Hi there")
+    })
+
+    test("formats assistant message with human wait subtracted", () => {
+      const msg: AssistantMessage = {
+        id: "msg_123",
+        sessionID: "ses_123",
+        role: "assistant",
+        agent: "build",
+        modelID: "claude-sonnet-4-20250514",
+        providerID: "anthropic",
+        mode: "",
+        parentID: "msg_parent",
+        path: { cwd: "/test", root: "/test" },
+        cost: 0.001,
+        tokens: { input: 100, output: 50, reasoning: 0, cache: { read: 0, write: 0 } },
+        time: { created: 1000000, completed: 1005400 },
+      }
+      const parts: Part[] = [
+        {
+          id: "p1",
+          sessionID: "ses_123",
+          messageID: "msg_123",
+          type: "tool",
+          callID: "call_1",
+          tool: "question",
+          state: {
+            status: "completed",
+            input: {},
+            output: "answer",
+            title: "Question",
+            metadata: {},
+            time: { start: 1000000, end: 1005000 },
+          },
+          metadata: { humanWaitMs: 4000 },
+        },
+      ]
+      const result = formatMessage(msg, parts, options)
+      expect(result).toContain("## Assistant (Build · Claude Sonnet 4 · 1.4s)")
     })
   })
 

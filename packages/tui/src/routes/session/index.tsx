@@ -38,6 +38,7 @@ import type {
 } from "@opencode-ai/sdk/v2"
 import { useLocal } from "../../context/local"
 import { Locale } from "../../util/locale"
+import { subagentElapsedMs, turnElapsedMs } from "../../util/session"
 import { webSearchProviderLabel } from "../../util/tool-display"
 import { Dynamic, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "../../context/sdk"
@@ -1616,7 +1617,9 @@ function AssistantMessage(props: { message: AssistantMessage; parts: Part[]; las
     if (!props.message.time.completed) return 0
     const user = messages().find((x) => x.role === "user" && x.id === props.message.parentID)
     if (!user || !user.time) return 0
-    return props.message.time.completed - user.time.created
+    const siblings = messages().filter((x) => x.role === "assistant" && x.parentID === props.message.parentID)
+    const parts = siblings.map((msg) => sync.data.part[msg.id] ?? [])
+    return turnElapsedMs({ start: user.time.created, completed: props.message.time.completed, parts })
   })
 
   const childShortcut = useCommandShortcut("session.child.first")
@@ -2479,8 +2482,15 @@ function Task(props: ToolProps) {
   const duration = createMemo(() => {
     const first = messages().find((x) => x.role === "user")?.time.created
     const assistant = messages().findLast((x) => x.role === "assistant")?.time.completed
-    if (!first || !assistant) return 0
-    return assistant - first
+    const parts = messages().flatMap((msg) =>
+      (sync.data.part[msg.id] ?? []).filter((part): part is ToolPart => part.type === "tool"),
+    )
+    return subagentElapsedMs({
+      partStart: props.part.state.status === "pending" ? undefined : props.part.state.time.start,
+      firstUserCreated: first,
+      lastCompleted: assistant,
+      parts,
+    })
   })
 
   const agentName = createMemo(() =>

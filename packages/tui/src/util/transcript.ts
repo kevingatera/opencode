@@ -1,6 +1,7 @@
 import type { AssistantMessage, Part, Provider, UserMessage } from "@opencode-ai/sdk/v2"
 import { Locale } from "./locale"
 import * as Model from "./model"
+import { toolWaitMs } from "./session"
 
 export type TranscriptOptions = {
   thinking: boolean
@@ -56,7 +57,7 @@ export function formatMessage(
   if (msg.role === "user") {
     result += `## User\n\n`
   } else {
-    result += formatAssistantHeader(msg, options.assistantMetadata, providers ?? options.providers)
+    result += formatAssistantHeader(msg, options.assistantMetadata, providers ?? options.providers, parts)
   }
 
   for (const part of parts) {
@@ -70,13 +71,18 @@ export function formatAssistantHeader(
   msg: AssistantMessage,
   includeMetadata: boolean,
   providers?: Provider[] | ReadonlyMap<string, Provider>,
+  parts?: Part[],
 ): string {
   if (!includeMetadata) {
     return `## Assistant\n\n`
   }
 
+  let waited = 0
+  for (const part of parts ?? []) waited += toolWaitMs(part)
   const duration =
-    msg.time.completed && msg.time.created ? ((msg.time.completed - msg.time.created) / 1000).toFixed(1) + "s" : ""
+    msg.time.completed && msg.time.created
+      ? (Math.max(0, msg.time.completed - msg.time.created - waited) / 1000).toFixed(1) + "s"
+      : ""
 
   const modelName = Model.name(providers, msg.providerID, msg.modelID)
 
