@@ -205,6 +205,30 @@ describe("BashTool", () => {
     ),
   )
 
+  it.live("passes an optional reason through the bash permission request", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        return withTool(tmp.path, (registry) =>
+          executeTool(registry, call({ command: "git push origin main", reason: "Publish the reviewed release commit" })),
+        ).pipe(
+          Effect.andThen(
+            Effect.sync(() => {
+              expect(assertions).toMatchObject([
+                {
+                  action: "bash",
+                  metadata: { reason: "Publish the reviewed release commit" },
+                },
+              ])
+            }),
+          ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("resolves a relative workdir from the active Location", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),
