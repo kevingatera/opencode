@@ -594,6 +594,7 @@ export type SessionsContextOutput = {
               readonly id: string
               readonly text: string
               readonly providerMetadata?: { readonly [x: string]: { readonly [x: string]: JsonValue } }
+              readonly brief?: string
               readonly time?: { readonly created: number; readonly completed?: number }
             }
           | {
@@ -1672,6 +1673,7 @@ export type SessionsMessageOutput = {
               readonly id: string
               readonly text: string
               readonly providerMetadata?: { readonly [x: string]: { readonly [x: string]: JsonValue } }
+              readonly brief?: string
               readonly time?: { readonly created: number; readonly completed?: number }
             }
           | {
@@ -1844,6 +1846,7 @@ export type MessagesListOutput = {
               readonly id: string
               readonly text: string
               readonly providerMetadata?: { readonly [x: string]: { readonly [x: string]: JsonValue } }
+              readonly brief?: string
               readonly time?: { readonly created: number; readonly completed?: number }
             }
           | {

@@ -34,6 +34,7 @@ export type Event =
   | EventSessionNextReasoningStarted
   | EventSessionNextReasoningDelta
   | EventSessionNextReasoningEnded
+  | EventSessionNextReasoningBrief
   | EventSessionNextToolInputStarted
   | EventSessionNextToolInputDelta
   | EventSessionNextToolInputEnded
@@ -1023,6 +1024,17 @@ export type GlobalEvent = {
       }
     | {
         id: string
+        type: "session.next.reasoning.brief"
+        properties: {
+          timestamp: number
+          sessionID: string
+          assistantMessageID: string
+          reasoningID: string
+          brief: string
+        }
+      }
+    | {
+        id: string
         type: "session.next.tool.input.started"
         properties: {
           timestamp: number
@@ -1935,6 +1947,11 @@ export type Config = {
   enabled_providers?: Array<string>
   model?: string
   small_model?: string
+  reasoning_brief?: {
+    enabled?: boolean
+    max_output_tokens?: number
+    max_input_chars?: number
+  }
   default_agent?: string
   subagent_depth?: number
   username?: string
@@ -2887,6 +2904,7 @@ export type V2Event =
   | SessionNextReasoningStarted
   | SessionNextReasoningDelta
   | SessionNextReasoningEnded
+  | SessionNextReasoningBrief
   | SessionNextToolInputStarted
   | SessionNextToolInputDelta
   | SessionNextToolInputEnded
@@ -4040,6 +4058,7 @@ export type SessionMessageAssistantReasoning = {
   id: string
   text: string
   providerMetadata?: LlmProviderMetadata
+  brief?: string
   time?: {
     created: number
     completed?: number
@@ -5264,6 +5283,27 @@ export type SessionNextReasoningDelta = {
   }
 }
 
+export type SessionNextReasoningBrief = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.reasoning.brief"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    reasoningID: string
+    brief: string
+  }
+}
+
 export type SessionNextToolInputDelta = {
   id: string
   metadata?: {
@@ -6471,6 +6511,18 @@ export type EventSessionNextReasoningEnded = {
     reasoningID: string
     text: string
     providerMetadata?: LlmProviderMetadata
+  }
+}
+
+export type EventSessionNextReasoningBrief = {
+  id: string
+  type: "session.next.reasoning.brief"
+  properties: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    reasoningID: string
+    brief: string
   }
 }
 

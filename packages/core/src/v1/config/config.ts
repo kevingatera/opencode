@@ -77,6 +77,21 @@ export const Info = Schema.Struct({
   small_model: Schema.optional(Schema.String).annotate({
     description: "Small model to use for tasks like title generation in the format of provider/model",
   }),
+  reasoning_brief: Schema.optional(
+    Schema.Struct({
+      enabled: Schema.optional(Schema.Boolean).annotate({
+        description: "Generate a short ephemeral brief of each assistant turn's reasoning (default: false)",
+      }),
+      max_output_tokens: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum output tokens for the reasoning brief call (default: 256)",
+      }),
+      max_input_chars: Schema.optional(NonNegativeInt).annotate({
+        description: "Maximum input characters sent to the reasoning brief call (default: 9000)",
+      }),
+    }),
+  ).annotate({
+    description: "Toggleable cheap reasoning brief shown next to thinking blocks. Off by default: zero behavior or cost change.",
+  }),
   default_agent: Schema.optional(Schema.String).annotate({
     description:
       "Default agent to use when none is specified. Must be a primary agent. Falls back to 'build' if not set or if the specified agent is invalid.",

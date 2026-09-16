@@ -758,6 +758,7 @@ export function Session() {
       title: (() => {
         const next = nextThinkingMode(thinkingMode())
         if (next === "hide") return "Collapse thinking"
+        if (next === "brief") return "Show reasoning briefs"
         return "Expand thinking"
       })(),
       value: "session.toggle.thinking",
@@ -1726,7 +1727,17 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
   // layout never shifts. Click to open the full markdown block, click to close.
   const [expanded, setExpanded] = createSignal(false)
 
+  const inBrief = createMemo(() => ctx.thinkingMode() === "brief")
+  const brief = createMemo(() => {
+    // Brief arrives only via the live event into the TUI store; the stored
+    // wire part has no brief field.
+    const value = (props.part as ReasoningPart & { brief?: unknown }).brief
+    return typeof value === "string" && value.trim() ? value.trim() : undefined
+  })
   const content = createMemo(() => {
+    // Brief mode shows the cheap post-turn brief when one arrived,
+    // falling back to the raw block. Splitter behavior is unchanged.
+    if (inBrief() && brief()) return brief() as string
     // OpenRouter encrypts some reasoning blocks; drop the placeholder.
     return props.part.text.replace("[REDACTED]", "").trim()
   })
@@ -1740,15 +1751,20 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
   })
   const summary = createMemo(() => reasoningSummary(content()))
+  // A finalized title-only block is declared-unavailable, not streaming-pending.
+  // A finalized zero-length block renders as redacted. Streaming empties stay hidden.
+  const unavailable = createMemo(() => isDone() && summary().kind === "title-only")
+  const redacted = createMemo(() => !unavailable() && !content() && (opaque() || isDone()))
+  const toggleable = createMemo(() => inMinimal() && Boolean(content()) && !unavailable())
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
 
   const toggle = () => {
-    if (!inMinimal() || opaque()) return
+    if (!toggleable()) return
     setExpanded((prev) => !prev)
   }
 
   return (
-    <Show when={content() || opaque()}>
+    <Show when={content() || redacted() || unavailable()}>
       <box
         ref={(el: BoxRenderable) => alwaysSeparate.add(el)}
         paddingLeft={3}
@@ -1758,12 +1774,13 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
       >
         <box onMouseUp={toggle}>
           <ReasoningHeader
-            toggleable={inMinimal() && !opaque()}
+            toggleable={toggleable()}
             open={!inMinimal() || expanded()}
             done={isDone()}
             title={summary().title}
             duration={isDone() ? Locale.duration(duration()) : undefined}
-            encrypted={opaque()}
+            encrypted={redacted()}
+            unavailable={unavailable()}
           />
         </box>
         <Show when={!opaque() && (!inMinimal() || expanded()) && summary().body}>
@@ -1791,6 +1808,7 @@ function ReasoningHeader(props: {
   title: string | null
   duration?: string
   encrypted?: boolean
+  unavailable?: boolean
 }) {
   const { theme } = useTheme()
   const fg = () =>
@@ -1799,6 +1817,10 @@ function ReasoningHeader(props: {
       : theme.warning
   const completed = () => {
     if (props.encrypted) return `Thought${props.duration ? ` · ${props.duration}` : ""}`
+    if (props.unavailable) {
+      const detail = [props.title, "unavailable", props.duration].filter(Boolean).join(" · ")
+      return `Thought${detail ? `: ${detail}` : ""}`
+    }
     const detail = [props.title, props.duration].filter(Boolean).join(" · ")
     return `${props.toggleable ? (props.open ? "- " : "+ ") : ""}Thought${detail ? `: ${detail}` : ""}`
   }

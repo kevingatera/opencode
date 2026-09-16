@@ -371,6 +371,14 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
         })
       },
+      // Ephemeral display metadata only. No projector subscribes to this
+      // live-only event, so it never reaches stored rows.
+      "session.next.reasoning.brief": (event) => {
+        return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
+          const match = latestReasoning(draft, event.data.reasoningID)
+          if (match) match.brief = event.data.brief
+        })
+      },
       "session.next.retried": () => Effect.void,
       "session.next.compaction.started": () => Effect.void,
       "session.next.compaction.delta": () => Effect.void,

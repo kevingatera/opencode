@@ -47,6 +47,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { TaskTool, renderTaskOutput, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { ModelRouting } from "./model-routing"
+import { ReasoningBrief } from "./reasoning-brief"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { Database } from "@opencode-ai/core/database/database"
@@ -157,6 +158,18 @@ const layer = Layer.effect(
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const { db } = database
+    // The brief flow only needs service tags; reuse this layer's instances
+    // so the detached post-turn call shares state instead of rebuilding it.
+    const briefLayer = Layer.mergeAll(
+      Layer.succeed(Config.Service, config),
+      Layer.succeed(Session.Service, sessions),
+      Layer.succeed(Database.Service, database),
+      Layer.succeed(Agent.Service, agents),
+      Layer.succeed(ModelRouting.Service, routing),
+      Layer.succeed(Provider.Service, provider),
+      Layer.succeed(LLM.Service, llm),
+      Layer.succeed(EventV2Bridge.Service, events),
+    )
     const ops = Effect.fn("SessionPrompt.ops")(function* () {
       return {
         cancel: (sessionID: SessionID) => cancel(sessionID),
@@ -1484,6 +1497,13 @@ const layer = Layer.effect(
         }
 
         yield* compaction.prune({ sessionID }).pipe(Effect.ignore, Effect.forkIn(scope))
+        // Post-turn fire-and-forget: one cheap brief per reasoning block.
+        // Never fails the turn; disabled by default (zero cost when off).
+        yield* ReasoningBrief.requestBriefsForTurn(sessionID).pipe(
+          Effect.provide(briefLayer),
+          Effect.ignore,
+          Effect.forkIn(scope),
+        )
         return yield* lastAssistant(sessionID)
       },
     )

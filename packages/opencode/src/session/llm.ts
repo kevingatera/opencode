@@ -90,7 +90,7 @@ const live: Layer.Layer<
         sessionID: SessionID.make(input.sessionID),
         role: input.agent.name,
         model: { providerID: input.model.providerID, modelID: input.model.id },
-        auxiliary: input.small || input.agent.name === "compaction" || input.agent.name === "summary",
+        auxiliary: input.small || input.agent.name === "compaction" || input.agent.name === "summary" || input.agent.name === "reasoning-brief",
       })
       yield* Effect.logInfo("stream", {
         providerID: input.model.providerID,

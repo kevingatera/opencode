@@ -230,7 +230,7 @@ const layer = Layer.effect(
               sessionID: input.sessionID,
               role,
               model: input.model,
-              auxiliary: ["title", "summary", "compaction"].includes(role),
+              auxiliary: ["title", "summary", "compaction", "reasoning-brief"].includes(role),
             },
           )
           return `${role}: ${result.selected ? `${result.selected.providerID}/${result.selected.modelID}${result.anchorFallback ? " (anchor fallback: no configured candidate matches the anchor provider in same scope)" : ""}` : "unavailable"}; candidates (in order): ${result.candidates.map((candidate) => `${candidate.providerID}/${candidate.modelID}`).join(" -> ") || "none"}${result.pin ? `; child provider: ${result.pin}` : ""}`

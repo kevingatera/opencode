@@ -268,6 +268,21 @@ export namespace Reasoning {
     },
   })
   export type Ended = typeof Ended.Type
+
+  // Ephemeral display metadata for the toggleable cheap reasoning brief.
+  // Live-only: never stored, never replayed. Keyed by
+  // (sessionID, assistantMessageID, reasoningID) so clients can attach it
+  // to the matching thinking block without mutating stored reasoning parts.
+  export const Brief = Event.define({
+    type: "session.next.reasoning.brief",
+    schema: {
+      ...Base,
+      assistantMessageID: SessionMessage.ID,
+      reasoningID: Schema.String,
+      brief: Schema.String,
+    },
+  })
+  export type Brief = typeof Brief.Type
 }
 
 export namespace Tool {
@@ -495,6 +510,7 @@ export const Definitions = Event.inventory(
   Reasoning.Started,
   Reasoning.Delta,
   Reasoning.Ended,
+  Reasoning.Brief,
   Tool.Input.Started,
   Tool.Input.Delta,
   Tool.Input.Ended,
