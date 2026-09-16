@@ -1759,8 +1759,18 @@ const layer = Layer.effect(
         }
 
         const baseURL = iife(() => {
-          let url =
-            typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : model.api.url
+          const providerBase =
+            typeof options["baseURL"] === "string" && options["baseURL"] !== "" ? options["baseURL"] : undefined
+          let url = providerBase ?? model.api.url
+          if (model.providerID.startsWith("github-copilot") && providerBase && model.api.url) {
+            // Copilot models carry per-endpoint URLs: Claude needs the `/v1`
+            // prefix for the Anthropic Messages SDK while chat/responses use
+            // the bare host. When the model URL refines the provider base,
+            // keep the refinement so a host-only provider base cannot strip
+            // it (POST /messages 404s).
+            const base = providerBase.replace(/\/+$/, "")
+            if (model.api.url.length > base.length && model.api.url.startsWith(base)) url = model.api.url
+          }
           if (!url) return
 
           const loader = s.varsLoaders[model.providerID]
