@@ -169,6 +169,43 @@ function reply(
   }
 }
 
+function completedToolPart(input: { sessionID: SessionID; messageID: MessageID; tool: string; callID: string }) {
+  return {
+    id: PartID.ascending(),
+    sessionID: input.sessionID,
+    messageID: input.messageID,
+    type: "tool" as const,
+    tool: input.tool,
+    callID: input.callID,
+    state: {
+      status: "completed" as const,
+      input: { filePath: "/tmp/work.txt" },
+      output: "done",
+      title: input.tool,
+      metadata: {},
+      time: { start: 1, end: 2 },
+    },
+  }
+}
+
+function writerAssistantMessage(input: { sessionID: SessionID; parentID: MessageID }) {
+  return {
+    id: MessageID.ascending(),
+    role: "assistant" as const,
+    parentID: input.parentID,
+    sessionID: input.sessionID,
+    mode: "build",
+    agent: "build",
+    cost: 0,
+    path: { cwd: "/tmp", root: "/tmp" },
+    tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+    modelID: ref.modelID,
+    providerID: ref.providerID,
+    variant: "xhigh",
+    time: { created: Date.now() },
+  }
+}
+
 describe("tool.task", () => {
   it.instance(
     "routing chooses role candidates at the task prompt boundary",
@@ -1711,11 +1748,14 @@ describe("tool.task", () => {
   )
 
   it.instance(
-    "reviewer separation blocks same-model review without creating a session",
+    "reviewer separation blocks same-model review with writer authorship without creating a session",
     () =>
       Effect.gen(function* () {
         const sessions = yield* Session.Service
         const { chat, assistant } = yield* seed()
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
         const tool = yield* TaskTool
         const def = yield* tool.init()
         let calls = 0
@@ -1933,6 +1973,7 @@ describe("tool.task", () => {
 
         expect(calls).toBe(1)
         expect(result.metadata.subagentType).toBe("reviewer")
+        expect(result.output).toContain("no configured candidates")
         expect(yield* sessions.children(chat.id)).toHaveLength(1)
       }),
     {
@@ -2050,6 +2091,9 @@ describe("tool.task", () => {
       Effect.gen(function* () {
         const sessions = yield* Session.Service
         const { chat, assistant } = yield* seed()
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
         const tool = yield* TaskTool
         const def = yield* tool.init()
         const context = {
@@ -2100,7 +2144,11 @@ describe("tool.task", () => {
     "reviewer separation re-evaluates resumed tasks instead of skipping the check",
     () =>
       Effect.gen(function* () {
+        const sessions = yield* Session.Service
         const { chat, assistant } = yield* seed()
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
         const tool = yield* TaskTool
         const def = yield* tool.init()
         let calls = 0
@@ -2142,6 +2190,176 @@ describe("tool.task", () => {
             npm: "@ai-sdk/openai-compatible",
             options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
             models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation warns and executes a read-only same-model review",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "read", callID: "call-read-1" }),
+        )
+        const reader = yield* sessions.create({ parentID: chat.id, title: "Reader child", agent: "general" })
+        const readerUser = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: reader.id,
+          role: "user",
+          agent: "general",
+          model: ref,
+          time: { created: 1 },
+        })
+        const readerAssistant = yield* sessions.updateMessage(writerAssistantMessage({ sessionID: reader.id, parentID: readerUser.id }))
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: reader.id, messageID: readerAssistant.id, tool: "read", callID: "call-read-2" }),
+        )
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const result = yield* def.execute(
+          { description: "review PRs", prompt: "review these PRs", subagent_type: "reviewer" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.subagentType).toBe("reviewer")
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(result.output).toContain("no file-writing activity")
+        expect(yield* sessions.children(chat.id)).toHaveLength(2)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation blocks when a descendant wrote with the writer model",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const writer = yield* sessions.create({ parentID: chat.id, title: "Writer child", agent: "general" })
+        const writerUser = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          sessionID: writer.id,
+          role: "user",
+          agent: "general",
+          model: ref,
+          time: { created: 1 },
+        })
+        const writerAssistant = yield* sessions.updateMessage(writerAssistantMessage({ sessionID: writer.id, parentID: writerUser.id }))
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: writer.id, messageID: writerAssistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            { description: "review change", prompt: "review this", subagent_type: "reviewer" },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("Reviewer separation")
+        expect(calls).toBe(0)
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation warns and executes anchor fallback without authorship evidence",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const result = yield* def.execute(
+          { description: "review PRs", prompt: "review these PRs", subagent_type: "reviewer" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(result.output).toContain("anchor fallback")
+        expect(result.output).toContain("no file-writing activity")
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "same", anchor_fallback: true, roles: { reviewer: ["other/gpt"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
           },
         },
       }),

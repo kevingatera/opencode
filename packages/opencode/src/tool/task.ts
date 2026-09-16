@@ -192,6 +192,32 @@ const resolveResumedSubagentType = Effect.fn("TaskTool.resolveResumedSubagentTyp
   return input.storedType
 })
 
+const hasWriterAuthorshipEvidence = Effect.fn("TaskTool.hasWriterAuthorshipEvidence")(function* (input: {
+  sessions: Session.Interface
+  sessionID: SessionID
+  writer: { providerID: string; modelID: string }
+}) {
+  // Task-created children link through Session parentID; walk the whole
+  // descendant tree since nested subagents stay within the depth limit.
+  const visited = new Set<string>()
+  const queue = [input.sessionID]
+  while (queue.length > 0) {
+    const current = queue.shift()
+    if (!current) break
+    if (visited.has(current)) continue
+    visited.add(current)
+    const transcript: SessionV1.WithParts[] = yield* input.sessions.messages({ sessionID: current }).pipe(
+      Effect.orElseSucceed((): SessionV1.WithParts[] => []),
+    )
+    if (transcript.some((msg) => messageHasWriterEdits(msg, input.writer))) return true
+    const kids = yield* input.sessions.children(current)
+    for (const kid of kids) {
+      if (!visited.has(kid.id)) queue.push(kid.id)
+    }
+  }
+  return false
+})
+
 export const TaskTool = Tool.define(
   id,
   Effect.gen(function* () {
@@ -296,9 +322,11 @@ export const TaskTool = Tool.define(
       // V2 sessions share this id space, but the V2 runner resolves models through
       // the catalog without consulting routing state, so V2 turns are out of scope.
       // Preview with auxiliary:true so no child provider pin is written; a match
-      // fails before session creation. A forced match keeps running and its
-      // acknowledgement is prepended to the Task result text below (plus the log).
-      let forcedSeparationAck: string | undefined
+      // blocks only with authorship evidence (completed file writes by the writer
+      // model here or in descendant transcripts) and fails before session creation.
+      // Warn-proceed paths (unconfigured, no evidence) and forced matches prepend
+      // a visible note to the Task result text below (plus the log).
+      let separationNote: string | undefined
       if (!isExemptSeparationRole(next.name) && isSeparationRole(next.name, separationRolePatterns(cfg))) {
         const writerMsg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
           Effect.provideService(Database.Service, database),
@@ -309,7 +337,8 @@ export const TaskTool = Tool.define(
         const base = overrideModel ?? next.model ?? writer
         const configured = cfg.model_routing?.roles?.[next.name]
         if (!configured || configured.length === 0) {
-          yield* Effect.logWarning(reviewerUnconfiguredMessage({ role: next.name, writer }))
+          separationNote = reviewerUnconfiguredMessage({ role: next.name, writer })
+          yield* Effect.logWarning(separationNote)
         } else {
           const preview = yield* routing
             .resolve({ sessionID: ctx.sessionID, role: next.name, model: base, auxiliary: true })
@@ -319,15 +348,27 @@ export const TaskTool = Tool.define(
             const sameModel = resolved.providerID === writer.providerID && resolved.modelID === writer.modelID
             if (sameModel) {
               if (params.allow_same_model_review === true) {
-                forcedSeparationAck = reviewerForcedMessage({ role: next.name, writer })
-                yield* Effect.logWarning(forcedSeparationAck)
-              } else {
+                separationNote = reviewerForcedMessage({ role: next.name, writer })
+                yield* Effect.logWarning(separationNote)
+              }
+              if (params.allow_same_model_review !== true) {
                 const resolvedName = formatReviewerModel(resolved)
                 const fallback = !configured.includes(resolvedName) && !configured.includes("session")
-                const alternatives =
-                  configured.filter((candidate) => candidate !== resolvedName).join(", ") ||
-                  "none configured on a different model"
-                return yield* Effect.fail(new Error(reviewerBlockMessage({ role: next.name, resolvedName, writer, fallback, alternatives })))
+                const hasAuthorship = yield* hasWriterAuthorshipEvidence({
+                  sessions,
+                  sessionID: ctx.sessionID,
+                  writer,
+                })
+                if (!hasAuthorship) {
+                  separationNote = reviewerNoEvidenceMessage({ role: next.name, resolvedName, writer, fallback })
+                  yield* Effect.logWarning(separationNote)
+                }
+                if (hasAuthorship) {
+                  const alternatives =
+                    configured.filter((candidate) => candidate !== resolvedName).join(", ") ||
+                    "none configured on a different model"
+                  return yield* Effect.fail(new Error(reviewerBlockMessage({ role: next.name, resolvedName, writer, fallback, alternatives })))
+                }
               }
             }
           }
@@ -493,7 +534,7 @@ export const TaskTool = Tool.define(
                     state === "completed"
                       ? `Background task completed: ${params.description}`
                       : `Background task failed: ${params.description}`,
-                  text: withForcedSeparationAck(text, forcedSeparationAck),
+                  text: withSeparationNote(text, separationNote),
                 }),
               },
             ],
@@ -524,7 +565,7 @@ export const TaskTool = Tool.define(
           output: taskOutput({
             state: "running",
             summary: "Background task updated",
-            text: withForcedSeparationAck(BACKGROUND_UPDATED, forcedSeparationAck),
+            text: withSeparationNote(BACKGROUND_UPDATED, separationNote),
           }),
         }
       }
@@ -555,7 +596,7 @@ export const TaskTool = Tool.define(
           output: taskOutput({
             state: "running",
             summary: "Background task started",
-            text: withForcedSeparationAck(BACKGROUND_STARTED, forcedSeparationAck),
+            text: withSeparationNote(BACKGROUND_STARTED, separationNote),
           }),
         }
       }
@@ -590,7 +631,7 @@ export const TaskTool = Tool.define(
               metadata,
               output: taskOutput({
                 state: "completed",
-                text: withForcedSeparationAck(result?.output ?? "", forcedSeparationAck),
+                text: withSeparationNote(result?.output ?? "", separationNote),
               }),
             }
           }),
@@ -695,7 +736,36 @@ function reviewerUnconfiguredMessage(input: {
   return `Reviewer separation: role "${input.role}" has no configured candidates; proceeding with writer model ${formatReviewerModel(input.writer)}. Configure model_routing.roles["${input.role}"] or separation_roles to enforce independent review.`
 }
 
-function withForcedSeparationAck(text: string, ack: string | undefined) {
+function reviewerNoEvidenceMessage(input: {
+  role: string
+  resolvedName: string
+  writer: { providerID: string; modelID: string }
+  fallback: boolean
+}) {
+  const fallbackMark = input.fallback ? " (anchor fallback)" : ""
+  return [
+    `Reviewer separation: role "${input.role}" resolved to ${input.resolvedName}${fallbackMark}, matching the writer model ${formatReviewerModel(input.writer)}, but no file-writing activity by that model was found in this session or its subagent transcripts.`,
+    `Proceeding without independent authorship separation. Pass allow_same_model_review=true to silence this note, or model="provider/model" for an independent reviewer.`,
+  ].join(" ")
+}
+
+function isFileWriteTool(tool: string) {
+  return tool === "edit" || tool === "write" || tool === "apply_patch"
+}
+
+function messageHasWriterEdits(
+  msg: SessionV1.WithParts,
+  writer: { providerID: string; modelID: string },
+) {
+  if (msg.info.role !== "assistant") return false
+  if (MessageV2.isControl(msg)) return false
+  if (msg.info.providerID !== writer.providerID || msg.info.modelID !== writer.modelID) return false
+  return msg.parts.some(
+    (part) => part.type === "tool" && isFileWriteTool(part.tool) && part.state.status === "completed",
+  )
+}
+
+function withSeparationNote(text: string, ack: string | undefined) {
   if (!ack) return text
   return `${ack}\n\n${text}`
 }
