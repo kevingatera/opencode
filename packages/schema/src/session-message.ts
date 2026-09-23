@@ -150,9 +150,9 @@ export const AssistantReasoning = Schema.Struct({
   id: Schema.String,
   text: Schema.String,
   providerMetadata: ProviderMetadata.pipe(optional),
-  // Ephemeral display metadata from the toggleable cheap reasoning brief.
-  // Live-only: attached by live event projections, never written by the
-  // projector, omitted from storage when undefined.
+  // Display metadata from the toggleable cheap reasoning brief.
+  // Written by the projector when a reasoning.brief event arrives, omitted
+  // from storage when undefined. The display mode selects raw versus brief.
   brief: Schema.String.pipe(optional),
   time: Schema.Struct({
     created: DateTimeUtcFromMillis,

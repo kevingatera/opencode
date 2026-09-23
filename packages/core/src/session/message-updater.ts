@@ -371,8 +371,9 @@ export function update(adapter: Adapter, event: SessionEvent.Event) {
           }
         })
       },
-      // Ephemeral display metadata only. No projector subscribes to this
-      // live-only event, so it never reaches stored rows.
+      // Persisted display metadata for the toggleable cheap reasoning brief.
+      // The durable projector applies this onto the stored reasoning part;
+      // the display mode selects raw reasoning versus brief at render time.
       "session.next.reasoning.brief": (event) => {
         return updateOwnedAssistant(event.data.assistantMessageID, (draft) => {
           const match = latestReasoning(draft, event.data.reasoningID)

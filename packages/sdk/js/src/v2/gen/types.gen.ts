@@ -1636,6 +1636,7 @@ export type GlobalEvent = {
     | SyncEventSessionNextTextEnded
     | SyncEventSessionNextReasoningStarted
     | SyncEventSessionNextReasoningEnded
+    | SyncEventSessionNextReasoningBrief
     | SyncEventSessionNextToolInputStarted
     | SyncEventSessionNextToolInputEnded
     | SyncEventSessionNextToolCalled
@@ -1949,6 +1950,9 @@ export type Config = {
   small_model?: string
   reasoning_brief?: {
     enabled?: boolean
+    models?: {
+      [key: string]: boolean
+    }
     max_output_tokens?: number
     max_input_chars?: number
   }
@@ -2781,6 +2785,7 @@ export type SessionDurableEvent =
   | SessionNextToolFailed
   | SessionNextReasoningStarted
   | SessionNextReasoningEnded
+  | SessionNextReasoningBrief
   | SessionNextRetried
   | SessionNextCompactionStarted
   | SessionNextCompactionEnded
@@ -3610,6 +3615,24 @@ export type SyncEventSessionNextReasoningEnded = {
       reasoningID: string
       text: string
       providerMetadata?: LlmProviderMetadata
+    }
+  }
+}
+
+export type SyncEventSessionNextReasoningBrief = {
+  type: "sync"
+  id: string
+  syncEvent: {
+    type: "session.next.reasoning.brief.1"
+    id: string
+    seq: number
+    aggregateID: string
+    data: {
+      timestamp: number
+      sessionID: string
+      assistantMessageID: string
+      reasoningID: string
+      brief: string
     }
   }
 }
@@ -4677,6 +4700,27 @@ export type SessionNextReasoningEnded = {
   }
 }
 
+export type SessionNextReasoningBrief = {
+  id: string
+  metadata?: {
+    [key: string]: unknown
+  }
+  type: "session.next.reasoning.brief"
+  durable?: {
+    aggregateID: string
+    seq: number
+    version: number
+  }
+  location?: LocationRef
+  data: {
+    timestamp: number
+    sessionID: string
+    assistantMessageID: string
+    reasoningID: string
+    brief: string
+  }
+}
+
 export type SessionNextRetried = {
   id: string
   metadata?: {
@@ -5280,27 +5324,6 @@ export type SessionNextReasoningDelta = {
     assistantMessageID: string
     reasoningID: string
     delta: string
-  }
-}
-
-export type SessionNextReasoningBrief = {
-  id: string
-  metadata?: {
-    [key: string]: unknown
-  }
-  type: "session.next.reasoning.brief"
-  durable?: {
-    aggregateID: string
-    seq: number
-    version: number
-  }
-  location?: LocationRef
-  data: {
-    timestamp: number
-    sessionID: string
-    assistantMessageID: string
-    reasoningID: string
-    brief: string
   }
 }
 

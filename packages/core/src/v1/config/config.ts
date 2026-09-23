@@ -80,7 +80,10 @@ export const Info = Schema.Struct({
   reasoning_brief: Schema.optional(
     Schema.Struct({
       enabled: Schema.optional(Schema.Boolean).annotate({
-        description: "Generate a short ephemeral brief of each assistant turn's reasoning (default: false)",
+        description: "Default for models without a per-model entry (default: false)",
+      }),
+      models: Schema.optional(Schema.Record(Schema.String, Schema.Boolean)).annotate({
+        description: "Per-model brief toggle keyed by provider/model, e.g. {\"anthropic/claude-sonnet-4-6\": true}",
       }),
       max_output_tokens: Schema.optional(NonNegativeInt).annotate({
         description: "Maximum output tokens for the reasoning brief call (default: 256)",

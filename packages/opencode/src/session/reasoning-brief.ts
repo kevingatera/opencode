@@ -22,11 +22,14 @@ export const DEFAULT_MAX_INPUT_CHARS = 9000
 export const MAX_TASK_CHARS = 1000
 export const MAX_ANSWER_CHARS = 2000
 export const MAX_REASONING_CHARS = 6000
+export const MAX_TOOL_CHARS = 1200
 export const MAX_BRIEF_CHARS = 500
+export const MAX_BRIEF_PROMPT_CHARS = 450
+const MAX_TOOLS = 6
 const TRUNCATION_MARKER = "\n[...truncated...]\n"
 
-// One brief per assistant turn in the fixed Chose/Rejected/Uncertain skeleton.
-// Post-turn fire-and-forget, never stored, never fails the turn.
+// One brief per reasoning block of the turn: a single plain-language paragraph.
+// Post-turn fire-and-forget, persisted onto the reasoning part, never fails the turn.
 export function truncateReasoning(text: string, maxChars = MAX_REASONING_CHARS) {
   if (text.length <= maxChars) return text
   const budget = maxChars - TRUNCATION_MARKER.length
@@ -40,26 +43,43 @@ export function truncateText(text: string, maxChars: number) {
   return text.slice(0, maxChars) + TRUNCATION_MARKER
 }
 
-export function buildBriefInput(input: { task: string; answer: string; reasoning: string; maxOutputTokens: number }) {
+export function buildBriefInput(input: {
+  task: string
+  answer: string
+  reasoning: string
+  tools?: string[]
+  maxOutputTokens: number
+}) {
   const task = input.task.slice(0, MAX_TASK_CHARS)
   const answer = input.answer.slice(0, MAX_ANSWER_CHARS)
   const reasoning = truncateReasoning(input.reasoning)
+  const tools = (input.tools ?? []).map((entry) => truncateText(entry, MAX_TOOL_CHARS)).join("\n")
   return [
-    `Summarize what the thinking DECIDED, grounded in the final answer. Keep it under ${input.maxOutputTokens} output tokens.`,
-    "Use exactly this shape (omit Uncertain only when there is nothing uncertain):",
-    "- Chose: <outcome thinking committed to> (180 chars max, 1 line)",
-    `- Rejected: <alternative> — <why>, or "Rejected: not stated" (never omit the line)`,
-    "- Uncertain: <unknowns or admitted dead-ends>",
-    "Rules: total 500 chars max. State OUTCOMES, not intentions. Exact technical terms, filenames, numbers.",
-    "FORBIDDEN: first-person narration, filler, markdown headings/bold, unclosed title-only lines, multiple paragraphs, verbatim repeats, anything unsupported by the final answer.",
-    "Title-only or empty thinking means an empty string; never invent a Chose from a title.",
+    `Describe what was done and decided in one plain-language paragraph of at most ${MAX_BRIEF_PROMPT_CHARS} characters, including spaces. Keep it under ${input.maxOutputTokens} output tokens.`,
+    "Write it as a plain description of completed work. Never narrate thinking and never describe plans: no planned, next, will, intended, or prepared to. Use past tense for actions that happened. The reader is technical: keep exact terms, filenames, numbers. Gloss genuine jargon once, then use it freely; never explain everyday tooling.",
+    "Ground every claim in the final answer, the tool results, or the thinking. State outcomes, not intentions.",
+    "The final answer may be empty. When it is, describe only concrete actions and findings present in the tool results or the thinking. If there is no completed action or finding, output an empty string. Never invent content.",
+    "FORBIDDEN: bullets, labels, bold, headings, first-person rambling, filler, verbatim repeats, forward-looking statements.",
     "",
     `<task>${task}</task>`,
     `<final>${answer}</final>`,
+    `<tools>${tools}</tools>`,
     `<thinking>${reasoning}</thinking>`,
   ].join("\n")
 }
 
+// Per-model resolution: an explicit entry for this turn's model wins,
+// otherwise the master default applies (off when unset).
+export function isBriefEnabled(
+  config: { enabled?: boolean; models?: Record<string, boolean> } | undefined,
+  providerID: string,
+  modelID: string,
+) {
+  if (!config) return false
+  const entry = config.models?.[`${providerID}/${modelID}`]
+  if (entry !== undefined) return entry
+  return config.enabled ?? false
+}
 // Title-only thinking carries no committable content: a complete "**Title**"
 // with no body, or an unclosed "**Title" fragment. Closed-source evidence
 // shows openai-style providers emit these in ~99% of turns; calling the
@@ -87,10 +107,16 @@ export function shouldRequestBrief(input: { enabled: boolean; text: string; meta
 export function cleanBrief(text: string) {
   const cleaned = text
     .replace(/<think>[\s\S]*?<\/think>\s*/g, "")
+    // Providers leak their own channel/tool markup into otherwise plain text:
+    // stray closing tags (</think>), wrappers (<final>, <unknown>), and
+    // DeepSeek DSML tool syntax. Strip them so the brief stays a paragraph.
+    .replace(/<\/?(?:think|final|unknown|result|tool_calls|tool_call|invoke|parameter)\b[^>]*>/gi, " ")
+    .replace(/<\/?[｜|][^<>]*>/g, " ")
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
-    .join("\n")
+    .join(" ")
+    .replace(/\s+/g, " ")
     .trim()
   if (cleaned.length <= MAX_BRIEF_CHARS) return cleaned
   return cleaned.substring(0, MAX_BRIEF_CHARS - 3).trimEnd() + "..."
@@ -113,7 +139,7 @@ export const requestBriefsForTurn = Effect.fn("ReasoningBrief.requestBriefsForTu
 ) {
   const config = yield* Config.Service
   const briefConfig = (yield* config.get()).reasoning_brief
-  if (!briefConfig?.enabled) return
+  if (!briefConfig) return
   const maxOutputTokens = briefConfig.max_output_tokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const maxInputChars = briefConfig.max_input_chars ?? DEFAULT_MAX_INPUT_CHARS
 
@@ -131,49 +157,72 @@ export const requestBriefsForTurn = Effect.fn("ReasoningBrief.requestBriefsForTu
   if (!lastUser || !lastAssistant) return
   if (lastAssistant.parentID !== lastUser.id) return
   if (!lastAssistant.time.completed) return
+  if (!isBriefEnabled(briefConfig, lastUser.model.providerID, lastUser.model.modelID)) return
 
   const userMsg = msgs.find((msg) => msg.info.id === lastUser.id)
-  const assistantMsg = msgs.find((msg) => msg.info.id === lastAssistant.id)
-  if (!userMsg || !assistantMsg) return
+  if (!userMsg) return
+  // Every completed assistant message of the current turn carries its own
+  // reasoning blocks; brief each of them in chronological order, not just
+  // the latest message's blocks.
+  const turnAssistants = msgs
+    .filter(
+      (msg): msg is SessionV1.WithParts & { info: SessionV1.Assistant } =>
+        msg.info.role === "assistant" && msg.info.parentID === lastUser.id && msg.info.time.completed !== undefined,
+    )
+    .sort(
+      (a, b) => a.info.time.created - b.info.time.created || (a.info.id < b.info.id ? -1 : a.info.id > b.info.id ? 1 : 0),
+    )
+  if (turnAssistants.length === 0) return
 
   const task = userMsg.parts
     .filter((part): part is SessionV1.TextPart => part.type === "text")
     .map((part) => part.text)
     .join("\n")
-  const answer = assistantMsg.parts
-    .filter((part): part is SessionV1.TextPart => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-  const reasoningParts = assistantMsg.parts.filter(
-    (part): part is SessionV1.ReasoningPart => part.type === "reasoning",
-  )
-  if (reasoningParts.length === 0) return
 
   // Sequential: the caller already forks this flow detached, and the
   // in-flight set keeps overlapping turns from stacking duplicate calls.
-  for (const part of reasoningParts) {
-    if (!shouldRequestBrief({ enabled: true, text: part.text, metadata: part.metadata })) continue
-    const key = briefKey(sessionID, lastAssistant.id, part.id)
-    if (inflight.has(key)) continue
-    inflight.add(key)
-    yield* requestOne({
-      sessionID,
-      user: lastUser,
-      providerID: lastUser.model.providerID,
-      modelID: lastUser.model.modelID,
-      task,
-      answer,
-      reasoning: part.text,
-      messageID: lastAssistant.id,
-      reasoningID: part.id,
-      maxOutputTokens,
-      maxInputChars,
-    }).pipe(
-      Effect.ensuring(Effect.sync(() => inflight.delete(key))),
-      Effect.catchCause((cause) =>
-        Effect.logWarning("reasoning brief skipped", { error: String(Cause.squash(cause)) }),
-      ),
+  for (const assistantMsg of turnAssistants) {
+    const answer = assistantMsg.parts
+      .filter((part): part is SessionV1.TextPart => part.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+    // Tool results carry the outcomes for reasoning-only steps whose final
+    // answer is empty; without them a brief can only paraphrase a plan.
+    const tools = assistantMsg.parts
+      .flatMap((part) => {
+        if (part.type !== "tool") return []
+        if (part.state.status !== "completed") return []
+        return [`${part.tool}: ${part.state.output}`]
+      })
+      .slice(-MAX_TOOLS)
+    const reasoningParts = assistantMsg.parts.filter(
+      (part): part is SessionV1.ReasoningPart => part.type === "reasoning",
     )
+    for (const part of reasoningParts) {
+      if (!shouldRequestBrief({ enabled: true, text: part.text, metadata: part.metadata })) continue
+      const key = briefKey(sessionID, assistantMsg.info.id, part.id)
+      if (inflight.has(key)) continue
+      inflight.add(key)
+      yield* requestOne({
+        sessionID,
+        user: lastUser,
+        providerID: lastUser.model.providerID,
+        modelID: lastUser.model.modelID,
+        task,
+        answer,
+        tools,
+        reasoning: part.text,
+        messageID: assistantMsg.info.id,
+        reasoningID: part.id,
+        maxOutputTokens,
+        maxInputChars,
+      }).pipe(
+        Effect.ensuring(Effect.sync(() => inflight.delete(key))),
+        Effect.catchCause((cause) =>
+          Effect.logWarning("reasoning brief skipped", { error: String(Cause.squash(cause)) }),
+        ),
+      )
+    }
   }
 })
 
@@ -184,6 +233,7 @@ const requestOne = Effect.fn("ReasoningBrief.requestOne")(function* (input: {
   modelID: ModelV2.ID
   task: string
   answer: string
+  tools: string[]
   reasoning: string
   messageID: string
   reasoningID: string
@@ -216,6 +266,7 @@ const requestOne = Effect.fn("ReasoningBrief.requestOne")(function* (input: {
     buildBriefInput({
       task: input.task,
       answer: input.answer,
+      tools: input.tools,
       reasoning: input.reasoning,
       maxOutputTokens: input.maxOutputTokens,
     }),

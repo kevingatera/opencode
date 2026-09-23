@@ -27,6 +27,7 @@ import { SessionCompaction } from "@/session/compaction"
 import { SessionSummary } from "@/session/summary"
 import { Instruction } from "@/session/instruction"
 import { SessionProcessor } from "@/session/processor"
+import { SessionPrompt } from "@/session/prompt"
 import { SessionRevert } from "@/session/revert"
 import { SessionRunState } from "@/session/run-state"
 import { MessageID, PartID, SessionID } from "@/session/schema"
@@ -39,8 +40,9 @@ import { Truncate } from "@/tool/truncate"
 import { CrossSpawnSpawner } from "@opencode-ai/core/cross-spawn-spawner"
 import { Ripgrep } from "@opencode-ai/core/ripgrep"
 import { Format } from "@/format"
+import { Global } from "@opencode-ai/core/global"
 import { TestInstance } from "../fixture/fixture"
-import { awaitWithTimeout, testEffect } from "../lib/effect"
+import { awaitWithTimeout, pollWithTimeout, testEffect } from "../lib/effect"
 import { TestLLMServer } from "../lib/llm-server"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { ProviderV2 } from "@opencode-ai/core/provider"
@@ -53,9 +55,12 @@ import { ModelRouting } from "@/session/model-routing"
 import {
   buildBriefInput,
   cleanBrief,
+  isBriefEnabled,
   isTitleOnlyReasoning,
   MAX_BRIEF_CHARS,
+  MAX_BRIEF_PROMPT_CHARS,
   MAX_REASONING_CHARS,
+  MAX_TOOL_CHARS,
   requestBriefsForTurn,
   shouldRequestBrief,
   truncateReasoning,
@@ -70,6 +75,13 @@ describe("reasoning_brief config", () => {
     expect(decoded.reasoning_brief?.enabled).toBe(true)
     expect(decoded.reasoning_brief?.max_output_tokens).toBe(128)
     expect(decoded.reasoning_brief?.max_input_chars).toBe(4000)
+  })
+
+  test("decodes per-model entries", () => {
+    const decoded = Schema.decodeUnknownSync(ConfigV1.Info)({
+      reasoning_brief: { models: { "test/test-model": true } },
+    })
+    expect(decoded.reasoning_brief?.models?.["test/test-model"]).toBe(true)
   })
 
   test("absent by default so behavior is unchanged", () => {
@@ -132,21 +144,54 @@ describe("buildBriefInput", () => {
     expect(input).toContain("[...truncated...]")
   })
 
-  test("carries the skeleton labels and budgets", () => {
+  test("carries the paragraph shape, budgets, and plain-language rules", () => {
     const input = buildBriefInput({ task: "t", answer: "a", reasoning: "r", maxOutputTokens: 256 })
-    expect(input).toContain("- Chose:")
-    expect(input).toContain("- Rejected:")
-    expect(input).toContain("- Uncertain:")
-    expect(input).toContain("Rejected: not stated")
-    expect(input).toContain("180")
-    expect(input).toContain("500")
-    expect(input).toContain("OUTCOMES")
+    expect(input).toContain("plain-language paragraph")
+    expect(input).toContain("plain description of completed work")
+    expect(input).toContain("Never narrate thinking")
+    expect(input).toContain("never explain everyday tooling")
+    expect(input).toContain(String(MAX_BRIEF_PROMPT_CHARS))
+    expect(input).toContain("State outcomes, not intentions.")
+    expect(input).toContain("<tools></tools>")
+    expect(input).not.toContain("- Chose:")
+    expect(input).not.toContain("- Rejected:")
+    expect(input).not.toContain("- Uncertain:")
+  })
+
+  test("carries tool results for steps whose final answer is empty", () => {
+    const input = buildBriefInput({
+      task: "t",
+      answer: "",
+      tools: ["bash: build passed", "read: 12 lines"],
+      reasoning: "r",
+      maxOutputTokens: 256,
+    })
+    expect(input).toContain("<tools>bash: build passed\nread: 12 lines</tools>")
+  })
+
+  test("caps each tool result", () => {
+    const input = buildBriefInput({
+      task: "t",
+      answer: "a",
+      tools: ["b".repeat(5000)],
+      reasoning: "r",
+      maxOutputTokens: 256,
+    })
+    expect(input).toContain("b".repeat(MAX_TOOL_CHARS))
+    expect(input).not.toContain("b".repeat(MAX_TOOL_CHARS + 1))
   })
 })
 
 describe("cleanBrief", () => {
-  test("strips think tags and blank lines", () => {
-    expect(cleanBrief("<think>hmm</think>\n\n- decided X\n- decided Y\n")).toBe("- decided X\n- decided Y")
+  test("strips think tags and collapses to a single paragraph", () => {
+    expect(cleanBrief("<think>hmm</think>\n\nDecided X after weighing Y.\nKept the change small.")).toBe(
+      "Decided X after weighing Y. Kept the change small.",
+    )
+  })
+
+  test("strips leaked provider channel and tool tags", () => {
+    expect(cleanBrief("</think> Decided X. <final>done</final> <unknown> note")).toBe("Decided X. done note")
+    expect(cleanBrief("<｜DSML｜tool_calls> ran stat </｜DSML｜tool_calls>")).toBe("ran stat")
   })
 
   test("empty output stays empty", () => {
@@ -157,6 +202,27 @@ describe("cleanBrief", () => {
     const result = cleanBrief("w".repeat(1000))
     expect(result.length).toBe(MAX_BRIEF_CHARS)
     expect(result.endsWith("...")).toBe(true)
+  })
+})
+
+describe("isBriefEnabled", () => {
+  test("absent config stays off", () => {
+    expect(isBriefEnabled(undefined, "test", "test-model")).toBe(false)
+    expect(isBriefEnabled({}, "test", "test-model")).toBe(false)
+  })
+
+  test("master default applies without an entry", () => {
+    expect(isBriefEnabled({ enabled: true }, "test", "test-model")).toBe(true)
+    expect(isBriefEnabled({ enabled: false }, "test", "test-model")).toBe(false)
+  })
+
+  test("per-model entry beats the master default", () => {
+    expect(isBriefEnabled({ enabled: false, models: { "test/test-model": true } }, "test", "test-model")).toBe(true)
+    expect(isBriefEnabled({ enabled: true, models: { "test/test-model": false } }, "test", "test-model")).toBe(false)
+  })
+
+  test("other models fall back to the master default", () => {
+    expect(isBriefEnabled({ enabled: true, models: { "test/other": false } }, "test", "test-model")).toBe(true)
   })
 })
 
@@ -310,6 +376,7 @@ const briefRoot = LayerNode.group([
   Format.node,
   Truncate.node,
   SessionProcessor.node,
+  SessionPrompt.node,
   Image.node,
   SessionCompaction.node,
   SessionRevert.node,
@@ -454,7 +521,7 @@ function seedTurn(input: {
 }
 
 describe("requestBriefsForTurn end to end", () => {
-  it.instance("publishes a live-only brief for visible reasoning", () =>
+  it.instance("publishes a durable brief for visible reasoning", () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => ({
         ...providerCfg(url),
@@ -473,19 +540,25 @@ describe("requestBriefsForTurn end to end", () => {
         (hit) => JSON.stringify(hit.body).includes("<thinking>"),
         "Decided on Postgres for indexed JSONB.",
       )
-      const received = yield* Deferred.make<typeof SessionEvent.Reasoning.Brief.data.Type>()
+      const received = yield* Deferred.make<{
+        data: typeof SessionEvent.Reasoning.Brief.data.Type
+        durable: { aggregateID: string; seq: number; version: number } | undefined
+      }>()
       const off = yield* events.listen((event) => {
         if (event.type !== SessionEvent.Reasoning.Brief.type) return Effect.void
         const data = event.data as typeof SessionEvent.Reasoning.Brief.data.Type
-        return Deferred.succeed(received, data)
+        return Deferred.succeed(received, { data, durable: event.durable })
       })
       yield* requestBriefsForTurn(chat.id)
-      const brief = yield* awaitWithTimeout(Deferred.await(received), "brief never published")
+      const published = yield* awaitWithTimeout(Deferred.await(received), "brief never published")
       yield* off
+      const brief = published.data
       expect(brief.brief).toBe("Decided on Postgres for indexed JSONB.")
       expect(brief.sessionID).toBe(chat.id)
       expect(String(brief.assistantMessageID)).toBe(String(seeded.assistant.id))
       expect(brief.reasoningID).toBe(seeded.reasoning.id)
+      expect(published.durable?.aggregateID).toBe(chat.id)
+      expect(published.durable?.version).toBe(1)
       expect(yield* llm.calls).toBe(1)
       const stored = yield* sessions.messages({ sessionID: chat.id })
       const storedReasoning = stored
@@ -496,7 +569,145 @@ describe("requestBriefsForTurn end to end", () => {
     }),
   )
 
-  it.instance("carries a prose wall through and publishes the skeleton verbatim", () =>
+  it.instance("briefs every reasoning block across the turn's assistant messages", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        reasoning_brief: { enabled: true },
+      }))
+      const sessions = yield* Session.Service
+      const events = yield* EventV2Bridge.Service
+      const chat = yield* sessions.create({ title: "MultiBrief" })
+      const { directory } = yield* TestInstance
+      const user = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "user",
+        sessionID: chat.id,
+        agent: "build",
+        model: ref,
+        time: { created: Date.now() },
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: user.id,
+        sessionID: chat.id,
+        type: "text",
+        text: "Which database should I use for JSON documents?",
+      })
+      const blocks = [
+        {
+          reasoning: "Postgres JSONB supports indexes; the workload is relational.",
+          answer: "Use Postgres with JSONB.",
+          brief: "Decided on Postgres for indexed JSONB.",
+        },
+        {
+          reasoning: "Redis streams buffer the ingest backlog before batch insert.",
+          answer: "Buffer with Redis streams.",
+          brief: "Buffered writes in Redis streams.",
+        },
+      ]
+      const assistants: Array<{ id: string; reasoningID: string }> = []
+      for (const block of blocks) {
+        const assistant = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "assistant",
+          parentID: user.id,
+          sessionID: chat.id,
+          mode: "build",
+          agent: "build",
+          path: { cwd: directory, root: directory },
+          cost: 0,
+          tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+          modelID: ref.modelID,
+          providerID: ref.providerID,
+          time: { created: Date.now(), completed: Date.now() },
+          finish: "stop",
+        })
+        const reasoning = yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: assistant.id,
+          sessionID: chat.id,
+          type: "reasoning",
+          text: block.reasoning,
+          time: { start: Date.now(), end: Date.now() },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: assistant.id,
+          sessionID: chat.id,
+          type: "text",
+          text: block.answer,
+        })
+        assistants.push({ id: String(assistant.id), reasoningID: reasoning.id })
+      }
+      // A trailing title-only block carries nothing committable and is skipped.
+      const trailing = yield* sessions.updateMessage({
+        id: MessageID.ascending(),
+        role: "assistant",
+        parentID: user.id,
+        sessionID: chat.id,
+        mode: "build",
+        agent: "build",
+        path: { cwd: directory, root: directory },
+        cost: 0,
+        tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+        modelID: ref.modelID,
+        providerID: ref.providerID,
+        time: { created: Date.now(), completed: Date.now() },
+        finish: "stop",
+      })
+      yield* sessions.updatePart({
+        id: PartID.ascending(),
+        messageID: trailing.id,
+        sessionID: chat.id,
+        type: "reasoning",
+        text: "**Planning to close run-created tab cautiously**",
+        time: { start: Date.now(), end: Date.now() },
+      })
+      yield* llm.textMatch(
+        (hit) => JSON.stringify(hit.body).includes("Postgres JSONB supports indexes"),
+        "Decided on Postgres for indexed JSONB.",
+      )
+      yield* llm.textMatch(
+        (hit) => JSON.stringify(hit.body).includes("Redis streams buffer"),
+        "Buffered writes in Redis streams.",
+      )
+      const seen: Array<{
+        reasoningID: string
+        brief: string
+        assistantMessageID: string
+        durable: { aggregateID: string; seq: number; version: number } | undefined
+      }> = []
+      const off = yield* events.listen((event) => {
+        if (event.type !== SessionEvent.Reasoning.Brief.type) return Effect.void
+        const data = event.data as typeof SessionEvent.Reasoning.Brief.data.Type
+        return Effect.sync(() => {
+          seen.push({
+            reasoningID: data.reasoningID,
+            brief: data.brief,
+            assistantMessageID: String(data.assistantMessageID),
+            durable: event.durable,
+          })
+        })
+      })
+      yield* requestBriefsForTurn(chat.id)
+      yield* pollWithTimeout(
+        Effect.sync(() => (seen.length === 2 ? (true as const) : undefined)),
+        "both turn briefs never published",
+      )
+      yield* off
+      expect(yield* llm.calls).toBe(2)
+      for (const [index, block] of blocks.entries()) {
+        const published = seen.find((entry) => entry.reasoningID === assistants[index]?.reasoningID)
+        expect(published?.brief).toBe(block.brief)
+        expect(published?.assistantMessageID).toBe(assistants[index]?.id)
+        expect(published?.durable?.aggregateID).toBe(chat.id)
+        expect(published?.durable?.version).toBe(1)
+      }
+    }),
+  )
+
+  it.instance("carries a prose wall through and publishes the paragraph verbatim", () =>
     Effect.gen(function* () {
       const { llm } = yield* useServerConfig((url) => ({
         ...providerCfg(url),
@@ -511,12 +722,10 @@ describe("requestBriefsForTurn end to end", () => {
         "The first approach failed on the join path; that dead-end cost an hour before the indexed scan worked. " +
         "No fallback was evaluated yet."
       yield* seedTurn({ sessionID: chat.id, directory, reasoning: { text: wall } })
-      const skeleton = [
-        "- Chose: Comparing patch IDs → separated via git cherry",
-        "- Rejected: not stated",
-        "- Uncertain: join-path dead-end cost an hour; no fallback evaluated",
-      ].join("\n")
-      yield* llm.textMatch((hit) => JSON.stringify(hit.body).includes("<thinking>"), skeleton)
+      const paragraph =
+        "Compared patch IDs with git cherry and separated them after the join-path approach failed. " +
+        "It is still unknown whether any fallback was evaluated."
+      yield* llm.textMatch((hit) => JSON.stringify(hit.body).includes("<thinking>"), paragraph)
       const received = yield* Deferred.make<typeof SessionEvent.Reasoning.Brief.data.Type>()
       const off = yield* events.listen((event) => {
         if (event.type !== SessionEvent.Reasoning.Brief.type) return Effect.void
@@ -526,7 +735,7 @@ describe("requestBriefsForTurn end to end", () => {
       yield* requestBriefsForTurn(chat.id)
       const brief = yield* awaitWithTimeout(Deferred.await(received), "brief never published")
       yield* off
-      expect(brief.brief).toBe(skeleton)
+      expect(brief.brief).toBe(paragraph)
       expect(yield* llm.calls).toBe(1)
       const inputs = yield* llm.inputs
       expect(inputs.some((body) => JSON.stringify(body).includes("unreplicated comparison"))).toBe(true)
@@ -538,6 +747,25 @@ describe("requestBriefsForTurn end to end", () => {
       const { llm } = yield* useServerConfig((url) => ({ ...providerCfg(url) }))
       const sessions = yield* Session.Service
       const chat = yield* sessions.create({ title: "NoBrief" })
+      const { directory } = yield* TestInstance
+      yield* seedTurn({
+        sessionID: chat.id,
+        directory,
+        reasoning: { text: "Visible thinking that must not trigger a call." },
+      })
+      yield* requestBriefsForTurn(chat.id)
+      expect(yield* llm.calls).toBe(0)
+    }),
+  )
+
+  it.instance("makes no LLM call when the per-model entry beats the master default", () =>
+    Effect.gen(function* () {
+      const { llm } = yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        reasoning_brief: { enabled: true, models: { "test/test-model": false } },
+      }))
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "PerModel" })
       const { directory } = yield* TestInstance
       yield* seedTurn({
         sessionID: chat.id,
@@ -598,6 +826,136 @@ describe("requestBriefsForTurn end to end", () => {
       const child = yield* sessions.create({ parentID: root.id, agent: "general" })
       yield* requestBriefsForTurn(child.id)
       expect(yield* llm.calls).toBe(0)
+    }),
+  )
+})
+
+describe("/thinking-brief command", () => {
+  function briefText(result: { parts: SessionV1.Part[] }) {
+    const part = result.parts.find((item): item is SessionV1.TextPart => item.type === "text")
+    return part?.text ?? ""
+  }
+
+  function readGlobalConfig(directory: string) {
+    return Effect.promise(() => Bun.file(path.join(directory, "opencode.json")).json() as Promise<unknown>)
+  }
+
+  function withTempGlobalConfig<A, E, R>(directory: string, effect: Effect.Effect<A, E, R>) {
+    return Effect.acquireUseRelease(
+      Effect.sync(() => {
+        const previous = Global.Path.config
+        ;(Global.Path as { config: string }).config = directory
+        return previous
+      }),
+      () => effect,
+      (previous) =>
+        Effect.sync(() => {
+          ;(Global.Path as { config: string }).config = previous
+        }),
+    )
+  }
+
+  it.instance("status reports OFF by default", () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({ ...providerCfg(url) }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "BriefCmd" })
+      const result = yield* prompt.command({ sessionID: chat.id, command: "thinking-brief", arguments: "" })
+      expect(briefText(result)).toContain("OFF")
+      expect(briefText(result)).toContain("test/test-model")
+    }),
+  )
+
+  it.instance("status reports ON when enabled", () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({ ...providerCfg(url), reasoning_brief: { enabled: true } }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "BriefCmd" })
+      const result = yield* prompt.command({
+        sessionID: chat.id,
+        command: "thinking-brief",
+        arguments: "status",
+        model: "test/test-model",
+      })
+      expect(briefText(result)).toContain("ON")
+      expect(briefText(result)).toContain("test/test-model")
+    }),
+  )
+
+  it.instance("on persists a per-model entry globally and names the restart", () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({ ...providerCfg(url) }))
+      const { directory } = yield* TestInstance
+      const globalDir = path.join(directory, "global")
+      yield* writeText(
+        path.join(globalDir, "opencode.json"),
+        JSON.stringify({ reasoning_brief: { models: { "test/other": true }, max_output_tokens: 128 } }),
+      )
+      const result = yield* withTempGlobalConfig(
+        globalDir,
+        Effect.gen(function* () {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({ title: "BriefCmd" })
+          return yield* prompt.command({
+            sessionID: chat.id,
+            command: "thinking-brief",
+            arguments: "on",
+            model: "test/test-model",
+          })
+        }),
+      )
+      expect(briefText(result)).toContain("Restart the server")
+      expect(briefText(result)).toContain("test/test-model")
+      const saved = (yield* readGlobalConfig(globalDir)) as {
+        reasoning_brief?: { enabled?: boolean; models?: Record<string, boolean>; max_output_tokens?: number }
+      }
+      expect(saved.reasoning_brief?.models?.["test/test-model"]).toBe(true)
+      expect(saved.reasoning_brief?.models?.["test/other"]).toBe(true)
+      expect(saved.reasoning_brief?.max_output_tokens).toBe(128)
+    }),
+  )
+
+  it.instance("off persists a per-model entry globally and names the restart", () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({
+        ...providerCfg(url),
+        reasoning_brief: { enabled: true },
+      }))
+      const { directory } = yield* TestInstance
+      const globalDir = path.join(directory, "global")
+      yield* writeText(path.join(globalDir, "opencode.json"), "{}")
+      const result = yield* withTempGlobalConfig(
+        globalDir,
+        Effect.gen(function* () {
+          const prompt = yield* SessionPrompt.Service
+          const sessions = yield* Session.Service
+          const chat = yield* sessions.create({ title: "BriefCmd" })
+          return yield* prompt.command({
+            sessionID: chat.id,
+            command: "thinking-brief",
+            arguments: "off",
+            model: "test/test-model",
+          })
+        }),
+      )
+      expect(briefText(result)).toContain("server restarts")
+      expect(briefText(result)).toContain("test/test-model")
+      const saved = (yield* readGlobalConfig(globalDir)) as { reasoning_brief?: { models?: Record<string, boolean> } }
+      expect(saved.reasoning_brief?.models?.["test/test-model"]).toBe(false)
+    }),
+  )
+
+  it.instance("rejects unknown actions with usage", () =>
+    Effect.gen(function* () {
+      yield* useServerConfig((url) => ({ ...providerCfg(url) }))
+      const prompt = yield* SessionPrompt.Service
+      const sessions = yield* Session.Service
+      const chat = yield* sessions.create({ title: "BriefCmd" })
+      const result = yield* prompt.command({ sessionID: chat.id, command: "thinking-brief", arguments: "maybe" })
+      expect(briefText(result)).toContain("Usage")
     }),
   )
 })

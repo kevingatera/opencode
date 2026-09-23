@@ -269,12 +269,14 @@ export namespace Reasoning {
   })
   export type Ended = typeof Ended.Type
 
-  // Ephemeral display metadata for the toggleable cheap reasoning brief.
-  // Live-only: never stored, never replayed. Keyed by
-  // (sessionID, assistantMessageID, reasoningID) so clients can attach it
-  // to the matching thinking block without mutating stored reasoning parts.
+  // Display metadata for the toggleable cheap reasoning brief.
+  // Durable and replayable: persisted onto the matching reasoning content
+  // by the projector. Keyed by (sessionID, assistantMessageID, reasoningID)
+  // so clients can attach it to the matching thinking block. The display
+  // mode selects raw reasoning versus brief at render time.
   export const Brief = Event.define({
     type: "session.next.reasoning.brief",
+    ...options,
     schema: {
       ...Base,
       assistantMessageID: SessionMessage.ID,
@@ -483,6 +485,7 @@ export const DurableDefinitions = Event.inventory(
   Tool.Failed,
   Reasoning.Started,
   Reasoning.Ended,
+  Reasoning.Brief,
   Retried,
   Compaction.Started,
   Compaction.Ended,

@@ -86,6 +86,12 @@ function capShellOutput(value: string) {
   return `${value.slice(0, half)}\n[command output truncated: ${value.length - half * 2} of ${value.length} characters omitted - run the command directly for the full output]\n${value.slice(-half)}`
 }
 
+function briefStatusText(enabled: boolean, modelKey: string) {
+  if (enabled)
+    return `Reasoning briefs are ON for ${modelKey}: new turns get a short plain-language summary of the thinking. View them by setting thinking to brief mode.`
+  return `Reasoning briefs are OFF for ${modelKey}. Turn on with /thinking-brief on (takes effect after the server restarts).`
+}
+
 const STRUCTURED_OUTPUT_DESCRIPTION = `Use this tool to return your final response in the requested structured format.
 
 IMPORTANT:
