@@ -308,6 +308,135 @@ describe("TUI inline tool wrapping", () => {
     )
   })
 
+  test("falls back to the bash command when a running tool has no title", () => {
+    const tools = [
+      {
+        tool: "bash",
+        state: {
+          status: "running",
+          input: { command: "rm -rf /tmp/scratch" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("bash")
+    const rendered = formatSubagentCurrentTool("bash", tools[0].state)
+    expect(rendered).toBe("Bash $ rm -rf /tmp/scratch")
+    expect(rendered).not.toContain("undefined")
+  })
+
+  test("truncates long bash commands in the running fallback", () => {
+    const rendered = formatSubagentCurrentTool("bash", {
+      status: "running",
+      input: { command: `rm -rf /tmp/scratch/${"a".repeat(100)}` },
+    })
+
+    expect(rendered.startsWith("Bash $ rm -rf")).toBe(true)
+    expect(rendered.endsWith("…")).toBe(true)
+    expect(rendered).not.toContain("undefined")
+  })
+
+  test("surfaces a newer error tool instead of a stale completed title", () => {
+    const tools = [
+      {
+        tool: "read",
+        state: {
+          status: "completed",
+          title: "subagent-data.ts",
+          input: { filePath: "/tmp/src/cli/cmd/run/subagent-data.ts" },
+        },
+      },
+      {
+        tool: "bash",
+        state: {
+          status: "error",
+          input: { command: "exit 1" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("bash")
+    const rendered = formatSubagentCurrentTool("bash", tools[1].state)
+    expect(rendered).toBe("Bash $ exit 1")
+    expect(rendered).not.toContain("subagent-data.ts")
+  })
+
+  test("surfaces the newest pending tool instead of a stale completed title", () => {
+    const tools = [
+      {
+        tool: "read",
+        state: {
+          status: "completed",
+          title: "subagent-data.ts",
+          input: { filePath: "/tmp/src/cli/cmd/run/subagent-data.ts" },
+        },
+      },
+      {
+        tool: "glob",
+        state: {
+          status: "pending",
+          input: { pattern: "**/*.ts" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("glob")
+    expect(formatSubagentCurrentTool("glob", tools[1].state)).toBe("Glob **/*.ts")
+  })
+
+  test("keeps a newer completed title ahead of an older error", () => {
+    const tools = [
+      {
+        tool: "bash",
+        state: {
+          status: "error",
+          input: { command: "exit 1" },
+        },
+      },
+      {
+        tool: "read",
+        state: {
+          status: "completed",
+          title: "subagent-data.ts",
+          input: { filePath: "/tmp/src/cli/cmd/run/subagent-data.ts" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("read")
+    expect(formatSubagentCurrentTool("read", tools[1].state)).toBe("Read subagent-data.ts")
+  })
+
+  test("renders a bare tool name when a running tool has empty input", () => {
+    const tools = [{ tool: "bash", state: { status: "running", input: {} } }]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("bash")
+    const rendered = formatSubagentCurrentTool("bash", tools[0].state)
+    expect(rendered).toBe("Bash")
+    expect(rendered).not.toContain("undefined")
+  })
+
+  test("falls back to input for a completed tool without a title instead of crashing", () => {
+    const tools = [
+      {
+        tool: "read",
+        state: {
+          status: "completed",
+          input: { filePath: "/tmp/src/cli/cmd/run/subagent-data.ts" },
+        },
+      },
+    ]
+
+    expect(currentSubagentTool(tools)?.tool).toBe("read")
+    const rendered = formatSubagentCurrentTool("read", tools[0].state)
+    expect(rendered).toBe("Read /tmp/src/cli/cmd/run/subagent-data.ts")
+    expect(rendered).not.toContain("undefined")
+  })
+
+  test("returns undefined for the toolcall-count fallback when no tools ran", () => {
+    expect(currentSubagentTool([])).toBeUndefined()
+  })
+
   test("falls back to the latest completed titled tool when nothing is running", () => {
     const tools = [
       {

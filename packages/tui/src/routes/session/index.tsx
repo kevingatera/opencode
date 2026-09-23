@@ -2573,11 +2573,8 @@ function Task(props: ToolProps) {
     if (isRunning() && retrying) {
       content.push(`↳ ${formatSubagentRetry(retrying.attempt, Locale.truncate(retrying.message, 80))}`)
     } else if (isRunning() && tools().length > 0) {
-      if (current()) {
-        const state = current()!.state
-        const title = state.status === "running" || state.status === "completed" ? state.title : undefined
-        content.push(`↳ ${Locale.titlecase(current()!.tool)} ${title}`)
-      } else content.push(`↳ ${formatSubagentToolcalls(tools().length)}`)
+      if (current()) content.push(`↳ ${formatSubagentCurrentTool(current()!.tool, current()!.state)}`)
+      else content.push(`↳ ${formatSubagentToolcalls(tools().length)}`)
     }
 
     if (!isRunning() && props.part.state.status === "completed") {
@@ -2621,11 +2618,20 @@ type SubagentToolEntry = {
 export function currentSubagentTool(tools: SubagentToolEntry[]) {
   const running = tools.findLast((x) => x.state.status === "running")
   if (running) return running
-  return tools.findLast((x) => x.state.status === "completed" && x.state.title)
+  const active = tools.findLast((x) => x.state.status === "pending" || x.state.status === "error")
+  const titled = tools.findLast((x) => x.state.status === "completed" && x.state.title)
+  if (active && (!titled || tools.lastIndexOf(active) > tools.lastIndexOf(titled))) return active
+  if (titled) return titled
+  return tools.findLast((x) => x.state.status === "completed")
 }
 
-function subagentToolInputLabel(input: Record<string, unknown> | undefined) {
+function subagentToolInputLabel(input: Record<string, unknown> | undefined, tool: string) {
   if (!input) return undefined
+
+  if (tool === "bash" || tool === "shell") {
+    const command = input.command
+    if (typeof command === "string" && command.trim()) return `$ ${Locale.truncate(command.trim(), 60)}`
+  }
 
   const filePath = input.filePath ?? input.filepath
   if (typeof filePath === "string" && filePath.trim()) return filePath.trim()
@@ -2639,10 +2645,8 @@ function subagentToolInputLabel(input: Record<string, unknown> | undefined) {
 }
 
 export function formatSubagentCurrentTool(tool: string, state: SubagentToolEntry["state"]) {
-  if (state.status !== "running" && state.status !== "completed") return Locale.titlecase(tool)
-
-  const detail =
-    typeof state.title === "string" && state.title.trim() ? state.title.trim() : subagentToolInputLabel(state.input)
+  const title = typeof state.title === "string" && state.title.trim() ? state.title.trim() : undefined
+  const detail = title ?? subagentToolInputLabel(state.input, tool)
   return detail ? `${Locale.titlecase(tool)} ${detail}` : Locale.titlecase(tool)
 }
 
