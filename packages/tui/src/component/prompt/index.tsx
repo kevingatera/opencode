@@ -105,6 +105,18 @@ const money = new Intl.NumberFormat("en-US", {
 
 const DRAFT_RETENTION_MIN_CHARS = 20
 
+export const PASTE_SUMMARY_MIN_LINES = 8
+export const PASTE_SUMMARY_MIN_CHARS = 500
+
+function countPasteLines(pastedContent: string) {
+  return (pastedContent.match(/\n/g)?.length ?? 0) + 1
+}
+
+export function shouldCollapsePastedText(pastedContent: string, pasteSummaryEnabled: boolean) {
+  if (!pasteSummaryEnabled) return false
+  return countPasteLines(pastedContent) > PASTE_SUMMARY_MIN_LINES || pastedContent.length > PASTE_SUMMARY_MIN_CHARS
+}
+
 function parseSlashInput(text: string) {
   if (!text.startsWith("/")) return
   const firstLineEnd = text.indexOf("\n")
@@ -1470,11 +1482,13 @@ export function Prompt(props: PromptProps) {
       }
     }
 
-    const lineCount = (pastedContent.match(/\n/g)?.length ?? 0) + 1
     if (
-      (lineCount >= 3 || pastedContent.length > 150) &&
-      kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary)
+      shouldCollapsePastedText(
+        pastedContent,
+        kv.get("paste_summary_enabled", !sync.data.config.experimental?.disable_paste_summary),
+      )
     ) {
+      const lineCount = countPasteLines(pastedContent)
       pasteText(pastedContent, `[Pasted ~${lineCount} lines]`)
       return
     }
