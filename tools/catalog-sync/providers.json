@@ -4,7 +4,8 @@
       "id": "commandcode",
       "baseURL": "https://api.commandcode.ai/provider/v1",
       "auth": "none",
-      "managed": "config"
+      "managed": "config",
+      "exclude": ["claude-*"]
     },
     {
       "id": "commandcode-anthropic",

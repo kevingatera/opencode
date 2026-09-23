@@ -50,6 +50,18 @@ registry entries always take precedence for an id both sides know.
 Paths can be overridden for testing: `OPENCODE_SYNC_REGISTRY` (default
 registry path) and `OPENCODE_SYNC_OVERRIDE` (override path).
 
+### `exclude`
+
+Optional array of model ids to never report as missing and never apply — exact
+ids or prefixes ending in `*`. Use it to keep deliberately dropped models out
+of the daily `--apply` (otherwise a `managed: "config"` provider re-adds
+everything the live endpoint still lists):
+
+```json
+"exclude": ["claude-*", "text-embedding-3-small"]
+```
+
+
 ### `auth`
 
 - `"none"` — no auth headers.

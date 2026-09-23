@@ -31,7 +31,7 @@ type Config = { provider?: Record<string, ConfigProvider> }
 type EndpointModel = { id: string; name?: unknown; context_length?: unknown }
 type AuthMode = "none" | "config" | "authstore" | `env:${string}`
 type ManagedMode = "config" | "report" | "override"
-type RegistryProvider = { id: string; baseURL: string | null; auth: AuthMode; managed: ManagedMode }
+type RegistryProvider = { id: string; baseURL: string | null; auth: AuthMode; managed: ManagedMode; exclude: string[] }
 type ModelCost = { input: number; output: number }
 
 type FetchResult =
@@ -200,6 +200,12 @@ function isManagedMode(value: unknown): value is ManagedMode {
   return value === "config" || value === "report" || value === "override"
 }
 
+// Exclude patterns are exact model ids or id prefixes ending in "*". Excluded
+// remote models are never reported as missing and never applied.
+function isExcluded(id: string, patterns: string[] = []): boolean {
+  return patterns.some((pattern) => (pattern.endsWith("*") ? id.startsWith(pattern.slice(0, -1)) : id === pattern))
+}
+
 function parseRegistry(data: unknown, source: string): { entries: RegistryProvider[]; warnings: string[] } {
   const warnings: string[] = []
   const providers = (data as { providers?: unknown } | null)?.providers
@@ -211,11 +217,12 @@ function parseRegistry(data: unknown, source: string): { entries: RegistryProvid
     const baseURL = typeof entry?.baseURL === "string" && entry.baseURL.length > 0 ? entry.baseURL : null
     const auth = entry?.auth
     const managed = entry?.managed
+    const exclude = Array.isArray(entry?.exclude) ? entry.exclude.filter((item): item is string => typeof item === "string") : []
     if (!id || !isAuthMode(auth) || !isManagedMode(managed)) {
       warnings.push(`${source}: skipped invalid provider entry${id ? ` (${id})` : ""}`)
       continue
     }
-    entries.push({ id, baseURL, auth, managed })
+    entries.push({ id, baseURL, auth, managed, exclude })
   }
   return { entries, warnings }
 }
@@ -287,7 +294,7 @@ async function syncEntry(entry: RegistryProvider): Promise<SyncResult> {
   const models = parseModelList(response.data)
   if (!models) return { ...base, status: response.status, error: "unrecognized /models response shape", note: auth.note }
   const remoteIds = models.map((model) => model.id)
-  const missing = remoteIds.filter((remote) => !local.includes(remote)).map((remote) => {
+  const missing = remoteIds.filter((remote) => !local.includes(remote) && !isExcluded(remote, entry.exclude)).map((remote) => {
     const endpointEntry = models.find((model) => model.id === remote)
     const named = typeof endpointEntry?.name === "string" && endpointEntry.name.length > 0 ? endpointEntry.name : humanize(remote)
     const toolCall = endpointEntry ? advertisesTools(endpointEntry as unknown as Record<string, unknown>) : false
@@ -547,7 +554,7 @@ const registryCount = byId.size
 const discovered: string[] = []
 for (const [id, provider] of Object.entries(config.provider ?? {})) {
   if (id in modelsDev || byId.has(id)) continue
-  byId.set(id, { id, baseURL: baseURLOf(provider), auth: "config", managed: "config" })
+  byId.set(id, { id, baseURL: baseURLOf(provider), auth: "config", managed: "config", exclude: [] })
   discovered.push(id)
 }
 const registry = [...byId.values()]
