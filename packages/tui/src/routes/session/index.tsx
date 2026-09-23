@@ -134,8 +134,6 @@ const sessionBindingCommands = [
   "session.toggle.actions",
   "session.toggle.scrollbar",
   "session.toggle.generic_tool_output",
-  "session.first",
-  "session.last",
   "session.messages_last_user",
   "session.message.next",
   "session.message.previous",
@@ -143,9 +141,6 @@ const sessionBindingCommands = [
   "session.copy",
   "session.export",
   "session.child.first",
-  "session.parent",
-  "session.child.next",
-  "session.child.previous",
 ] as const
 
 const sessionGlobalBindingCommands = [
@@ -157,7 +152,25 @@ const sessionGlobalBindingCommands = [
   "session.half.page.down",
 ] as const
 
-const sessionGlobalUnfocusedBindingCommands = ["session.first", "session.last"] as const
+// Session navigation that shares unmodified arrow and edge keys (left, right, up,
+// home, end) with the prompt editor. Registered in its own lower-priority layer so a
+// focused textarea keeps those keys for cursor movement; the non-colliding variants
+// of the same commands (ctrl+g, ctrl+alt+g) still fire.
+const sessionCursorBindingCommands = [
+  "session.first",
+  "session.last",
+  "session.parent",
+  "session.child.next",
+  "session.child.previous",
+] as const
+
+export function sessionCursorKeyLayer(config: Pick<TuiConfig.Resolved, "keybinds">) {
+  return {
+    mode: OPENCODE_BASE_MODE,
+    priority: -1,
+    bindings: config.keybinds.gather("session.cursor-keys", sessionCursorBindingCommands),
+  }
+}
 
 const context = createContext<{
   width: number
@@ -1177,10 +1190,7 @@ export function Session() {
     bindings: tuiConfig.keybinds.gather("session.global", sessionGlobalBindingCommands),
   }))
 
-  useBindings(() => ({
-    enabled: () => renderer.currentFocusedEditor === null,
-    bindings: tuiConfig.keybinds.gather("session.global.unfocused", sessionGlobalUnfocusedBindingCommands),
-  }))
+  useBindings(() => sessionCursorKeyLayer(tuiConfig))
 
   useBindings(() => ({
     mode: OPENCODE_BASE_MODE,
