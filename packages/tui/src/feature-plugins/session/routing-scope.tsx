@@ -7,15 +7,14 @@ const id = "internal:session-routing-scope"
 
 export type RoutingScope = "same" | "curated"
 
-// Durable routing state lives in backend Storage under ["model_routing", rootSessionID]
-// with no HTTP read path yet, so this badge derives the scope from the newest /routing
-// control message the backend persisted for the session: a synthetic assistant message
-// whose text part carries metadata { "opencode.control": "routing" } and starts with
-// "Legacy model routing: same|curated". Staleness limits: the badge only updates when a
-// /routing command runs in the visible session and only within the message pages the
-// TUI has loaded, so scope set by another client or paged out of the window is not
-// shown. Servers without the /routing feature never emit these messages, so the badge
-// stays hidden (fail silent).
+// Durable routing state lives in backend Storage under ["model_routing", rootSessionID].
+// The backend attaches a structured snapshot to every /routing control reply as part
+// metadata under "opencode.routing": { scope: "same" | "curated", rootSessionID, anchor }.
+// This badge reads that payload from the newest /routing control message in the loaded
+// messages. Limits: it only sees control messages within the message pages the TUI has
+// loaded, so scope changed by another client, paged out of the window, or written by a
+// server without the structured payload is not shown. No payload anywhere means the
+// badge stays hidden (fail silent).
 export function routingScope(
   messages: ReadonlyArray<Message>,
   parts: (messageID: string) => ReadonlyArray<Part>,
@@ -24,8 +23,10 @@ export function routingScope(
     if (message.role !== "assistant") continue
     for (const part of parts(message.id)) {
       if (part.type !== "text" || part.metadata?.["opencode.control"] !== "routing") continue
-      const scope = part.text.match(/^Legacy model routing: (same|curated)$/m)?.[1]
-      if (scope) return scope as RoutingScope
+      const payload = part.metadata?.["opencode.routing"]
+      if (!payload || typeof payload !== "object") continue
+      const scope = (payload as { scope?: unknown }).scope
+      if (scope === "same" || scope === "curated") return scope
     }
   }
   return

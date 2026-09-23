@@ -33,6 +33,33 @@ export function isThinkingMode(value: unknown): value is ThinkingMode {
   return typeof value === "string" && (MODES as readonly string[]).includes(value)
 }
 
+// Brief-mode display: keep the raw reasoning title in the header and show
+// the cheap post-turn brief as the body. Blocks with no brief fall back to
+// the raw summary exactly as in show mode.
+export function briefedSummary(
+  raw: string,
+  brief: string | undefined,
+): { title: string | null; body: string; kind: ReasoningKind } {
+  if (brief && brief.trim()) return { title: reasoningSummary(raw).title, body: brief.trim(), kind: "content" }
+  return reasoningSummary(raw)
+}
+
+// Resolves /thinking-brief arguments to a display change plus the argument
+// forwarded to the server builtin command. Bare input toggles; unknown input
+// is forwarded untouched so the server replies with usage.
+export function resolveThinkingBriefAction(
+  raw: string,
+  current: ThinkingMode,
+): { display: ThinkingMode | null; forward: string } {
+  const action = raw.trim().toLowerCase()
+  if (action === "on") return { display: "brief", forward: "on" }
+  if (action === "off") return { display: "hide", forward: "off" }
+  if (action === "status") return { display: null, forward: "status" }
+  if (action === "")
+    return current === "brief" ? { display: "hide", forward: "off" } : { display: "brief", forward: "on" }
+  return { display: null, forward: raw.trim() }
+}
+
 // Cycle order matches the slash command: show → hide → brief → show.
 // "brief" shows the cheap post-turn reasoning brief when one arrived,
 // falling back to the raw block otherwise.

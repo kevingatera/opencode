@@ -23,11 +23,14 @@ export class RoutingError extends Schema.TaggedErrorClass<RoutingError>()("Model
   message: Schema.String,
 }) {}
 
+export type RoutingRead = MessageV2.RoutingControlPayload
+
 type Input = { sessionID: SessionID; role: string; model: Model; auxiliary?: boolean }
 export interface Interface {
   readonly resolve: (input: Input) => Effect.Effect<Model & { routed?: boolean }>
   readonly check: (input: Input) => Effect.Effect<void>
   readonly command: (input: { sessionID: SessionID; action: string; model: Model }) => Effect.Effect<string>
+  readonly read: (input: { sessionID: SessionID; model: Model }) => Effect.Effect<RoutingRead | undefined>
 }
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelRouting") {}
 
@@ -250,7 +253,23 @@ const layer = Layer.effect(
       ].join("\n")
     }, lock.withPermits(1))
 
-    return Service.of({ resolve, check, command })
+    const read = Effect.fn("ModelRouting.read")(function* (input: { sessionID: SessionID; model: Model }) {
+      const loaded = yield* load(input.sessionID, input.model).pipe(
+        Effect.catchCause(() => Effect.succeed(undefined)),
+      )
+      if (!loaded) return undefined
+      if (!loaded.state.anchor) return undefined
+      return {
+        scope: loaded.state.scope,
+        rootSessionID: loaded.root.id,
+        anchor: {
+          providerID: loaded.state.anchor.providerID,
+          modelID: loaded.state.anchor.modelID,
+        },
+      }
+    })
+
+    return Service.of({ resolve, check, command, read })
   }),
 )
 

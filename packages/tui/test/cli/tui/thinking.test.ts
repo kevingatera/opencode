@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { reasoningSummary } from "../../../src/context/thinking"
+import { briefedSummary, reasoningSummary, resolveThinkingBriefAction } from "../../../src/context/thinking"
 
 describe("reasoningSummary", () => {
   test("extracts a leading summary title and leaves markdown body", () => {
@@ -55,5 +55,55 @@ describe("reasoningSummary", () => {
     const wall =
       "I'm skeptical of the unreplicated comparison. The first approach failed on the join path, so I went with the indexed scan instead."
     expect(reasoningSummary(wall)).toEqual({ title: null, body: wall, kind: "content" })
+  })
+})
+
+describe("briefedSummary", () => {
+  test("keeps the raw title and shows the brief as the body", () => {
+    expect(briefedSummary("**Inspecting database state**\n\nChecked the merge queue.", "Decided on Postgres.")).toEqual(
+      {
+        title: "Inspecting database state",
+        body: "Decided on Postgres.",
+        kind: "content",
+      },
+    )
+  })
+
+  test("falls back to the raw summary when no brief arrived", () => {
+    const raw = "**Inspecting database state**\n\nChecked the merge queue."
+    expect(briefedSummary(raw, undefined)).toEqual({
+      title: "Inspecting database state",
+      body: "Checked the merge queue.",
+      kind: "content",
+    })
+  })
+
+  test("treats a blank brief as no brief", () => {
+    expect(briefedSummary("Details only.", "   ")).toEqual({
+      title: null,
+      body: "Details only.",
+      kind: "content",
+    })
+  })
+})
+
+describe("resolveThinkingBriefAction", () => {
+  test("maps on and off to display plus forward", () => {
+    expect(resolveThinkingBriefAction("on", "hide")).toEqual({ display: "brief", forward: "on" })
+    expect(resolveThinkingBriefAction("OFF", "brief")).toEqual({ display: "hide", forward: "off" })
+  })
+
+  test("status forwards without touching display", () => {
+    expect(resolveThinkingBriefAction("status", "brief")).toEqual({ display: null, forward: "status" })
+  })
+
+  test("bare input toggles", () => {
+    expect(resolveThinkingBriefAction("", "brief")).toEqual({ display: "hide", forward: "off" })
+    expect(resolveThinkingBriefAction("", "hide")).toEqual({ display: "brief", forward: "on" })
+    expect(resolveThinkingBriefAction("", "show")).toEqual({ display: "brief", forward: "on" })
+  })
+
+  test("unknown input forwards untouched for the server usage reply", () => {
+    expect(resolveThinkingBriefAction("maybe", "hide")).toEqual({ display: null, forward: "maybe" })
   })
 })

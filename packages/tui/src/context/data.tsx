@@ -374,7 +374,8 @@ export const { use: useData, provider: DataProvider } = createSimpleContext({
           })
           break
         case "session.next.reasoning.brief":
-          // Ephemeral display metadata; dropped on refresh like other live state.
+          // Persisted display metadata; replayed onto the stored part so brief
+          // mode survives reload.
           message.update(event.data.sessionID, (draft) => {
             const match = message.latestReasoning(
               message.assistant(draft, event.data.assistantMessageID),

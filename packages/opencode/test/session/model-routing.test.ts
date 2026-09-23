@@ -629,3 +629,47 @@ for (const role of ["general", "title", "compaction"]) {
     { config },
   )
 }
+
+it.instance("read returns undefined when routing is off", () =>
+  Effect.gen(function* () {
+    const routing = yield* ModelRouting.Service
+    const sessions = yield* Session.Service
+    const root = yield* sessions.create({ title: "Root" })
+    expect(yield* routing.read({ sessionID: root.id, model: b })).toBeUndefined()
+  }),
+)
+
+it.instance(
+  "read returns the stored root state",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      yield* routing.command({ sessionID: root.id, action: "curated", model: a })
+      expect(yield* routing.read({ sessionID: root.id, model: a })).toMatchObject({
+        scope: "curated",
+        rootSessionID: root.id,
+        anchor: a,
+      })
+    }),
+  { config },
+)
+
+it.instance(
+  "read resolves a child session to its root state",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, title: "Child" })
+      yield* routing.command({ sessionID: root.id, action: "same", model: a })
+      expect(yield* routing.read({ sessionID: child.id, model: a })).toMatchObject({
+        scope: "same",
+        rootSessionID: root.id,
+        anchor: a,
+      })
+    }),
+  { config },
+)

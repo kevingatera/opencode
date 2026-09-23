@@ -1535,74 +1535,159 @@ const layer = Layer.effect(
       return yield* state.startShell(input.sessionID, lastAssistant(input.sessionID), shellImpl(input, ready), ready)
     })
 
+    const briefControlText = Effect.fn("SessionPrompt.briefControlText")(function* (input: {
+      sessionID: SessionID
+      action: string
+      model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+    }) {
+      const cfg = yield* config.get()
+      const model = input.model ?? (yield* currentModel(input.sessionID))
+      const key = `${model.providerID}/${model.modelID}`
+      const enabled = cfg.reasoning_brief?.models?.[key] ?? cfg.reasoning_brief?.enabled ?? false
+      if (input.action === "status") return briefStatusText(enabled, key)
+      const target = input.action === "on"
+      if (target === enabled) return briefStatusText(enabled, key)
+      // Config.update writes a project config.json that the loader never
+      // reads back; updateGlobal targets the global file that applies on
+      // restart. Instance state still caches the old value, hence the note.
+      yield* config.updateGlobal({
+        reasoning_brief: {
+          ...(cfg.reasoning_brief ?? {}),
+          models: { ...(cfg.reasoning_brief?.models ?? {}), [key]: target },
+        },
+      })
+      if (target)
+        return `Reasoning briefs turned ON for ${key} and saved globally. Restart the server so new turns generate briefs, then set thinking to brief mode to view them.`
+      return `Reasoning briefs turned OFF for ${key} and saved globally. Generation stops after the server restarts.`
+    })
+
+    // Shared control-message reply for builtin commands handled below.
+    // Mirrors the routing shape: synthetic control messages excluded from
+    // model history, plus a Command Executed event for live clients.
+    const respondControl = Effect.fn("SessionPrompt.respondControl")(function* (input: {
+      sessionID: SessionID
+      messageID?: MessageID
+      command: string
+      arguments: string
+      text: string
+      model?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+      agent?: string
+      control?: unknown
+    }) {
+      return yield* state
+        .startShell(
+          input.sessionID,
+          lastAssistant(input.sessionID),
+          Effect.gen(function* () {
+            const model = input.model ?? (yield* currentModel(input.sessionID))
+            const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
+            const ctx = yield* InstanceState.context
+            const agent = session.agent ?? input.agent ?? (yield* agents.defaultInfo()).name
+            const user = yield* sessions.updateMessage({
+              id: input.messageID ?? MessageID.ascending(),
+              sessionID: input.sessionID,
+              role: "user",
+              agent,
+              model,
+              system: MessageV2.RoutingControl,
+              time: { created: Date.now() },
+            })
+            yield* sessions.updatePart({
+              id: PartID.ascending(),
+              sessionID: input.sessionID,
+              messageID: user.id,
+              type: "text",
+              text: `/${input.command} ${input.arguments.trim() || "status"}`,
+              synthetic: true,
+              metadata: {
+                "opencode.control": input.command,
+                ...(input.control === undefined ? {} : { [MessageV2.RoutingControlMetadata]: input.control }),
+              },
+            })
+            const info: SessionV1.Assistant = {
+              id: MessageID.ascending(),
+              sessionID: input.sessionID,
+              parentID: user.id,
+              role: "assistant",
+              agent,
+              mode: MessageV2.RoutingControl,
+              modelID: model.modelID,
+              providerID: model.providerID,
+              path: { cwd: ctx.directory, root: ctx.worktree },
+              cost: 0,
+              tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
+              time: { created: Date.now(), completed: Date.now() },
+              finish: "stop",
+            }
+            yield* sessions.updateMessage(info)
+            const part = yield* sessions.updatePart({
+              id: PartID.ascending(),
+              sessionID: input.sessionID,
+              messageID: info.id,
+              type: "text",
+              text: input.text,
+              synthetic: true,
+              metadata: {
+                "opencode.control": input.command,
+                ...(input.control === undefined ? {} : { [MessageV2.RoutingControlMetadata]: input.control }),
+              },
+              time: { start: Date.now(), end: Date.now() },
+            })
+            yield* events.publish(Command.Event.Executed, {
+              name: input.command,
+              sessionID: input.sessionID,
+              arguments: input.arguments,
+              messageID: info.id,
+            })
+            return { info, parts: [part] }
+          }),
+        )
+        .pipe(Effect.orDie)
+    })
+
     const command = Effect.fn("SessionPrompt.command")(function* (input: CommandInput) {
+      if (input.command === "thinking-brief") {
+        const action = input.arguments.trim().toLowerCase() || "status"
+        if (!["on", "off", "status"].includes(action)) {
+          return yield* respondControl({
+            sessionID: input.sessionID,
+            messageID: input.messageID,
+            command: input.command,
+            arguments: input.arguments,
+            agent: input.agent,
+            text: "Usage: /thinking-brief on|off|status. Turns the plain-language reasoning brief on or off for new turns.",
+          })
+        }
+        const text = yield* briefControlText({
+          sessionID: input.sessionID,
+          action,
+          model: input.model ? Provider.parseModel(input.model) : undefined,
+        })
+        return yield* respondControl({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          command: input.command,
+          arguments: input.arguments,
+          agent: input.agent,
+          text,
+        })
+      }
       if (input.command === "routing") {
         // Reuse exclusive runner admission; normal loops queue behind the control,
         // and only the runner that owns this work may publish its idle transition.
-        return yield* state
-          .startShell(
-            input.sessionID,
-            lastAssistant(input.sessionID),
-            Effect.gen(function* () {
-              const model = input.model ? Provider.parseModel(input.model) : yield* currentModel(input.sessionID)
-              const text = yield* routing.command({ sessionID: input.sessionID, action: input.arguments, model })
-              const session = yield* sessions.get(input.sessionID).pipe(Effect.orDie)
-              const ctx = yield* InstanceState.context
-              const agent = session.agent ?? input.agent ?? (yield* agents.defaultInfo()).name
-              const user = yield* sessions.updateMessage({
-                id: input.messageID ?? MessageID.ascending(),
-                sessionID: input.sessionID,
-                role: "user",
-                agent,
-                model,
-                system: MessageV2.RoutingControl,
-                time: { created: Date.now() },
-              })
-              yield* sessions.updatePart({
-                id: PartID.ascending(),
-                sessionID: input.sessionID,
-                messageID: user.id,
-                type: "text",
-                text: `/routing ${input.arguments.trim() || "status"}`,
-                synthetic: true,
-                metadata: { "opencode.control": "routing" },
-              })
-              const info: SessionV1.Assistant = {
-                id: MessageID.ascending(),
-                sessionID: input.sessionID,
-                parentID: user.id,
-                role: "assistant",
-                agent,
-                mode: MessageV2.RoutingControl,
-                modelID: model.modelID,
-                providerID: model.providerID,
-                path: { cwd: ctx.directory, root: ctx.worktree },
-                cost: 0,
-                tokens: { input: 0, output: 0, reasoning: 0, cache: { read: 0, write: 0 } },
-                time: { created: Date.now(), completed: Date.now() },
-                finish: "stop",
-              }
-              yield* sessions.updateMessage(info)
-              const part = yield* sessions.updatePart({
-                id: PartID.ascending(),
-                sessionID: input.sessionID,
-                messageID: info.id,
-                type: "text",
-                text,
-                synthetic: true,
-                metadata: { "opencode.control": "routing" },
-                time: { start: Date.now(), end: Date.now() },
-              })
-              yield* events.publish(Command.Event.Executed, {
-                name: input.command,
-                sessionID: input.sessionID,
-                arguments: input.arguments,
-                messageID: info.id,
-              })
-              return { info, parts: [part] }
-            }),
-          )
-          .pipe(Effect.orDie)
+        const model = input.model ? Provider.parseModel(input.model) : yield* currentModel(input.sessionID)
+        const text = yield* routing.command({ sessionID: input.sessionID, action: input.arguments, model })
+        const control = yield* routing.read({ sessionID: input.sessionID, model })
+        return yield* respondControl({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          command: input.command,
+          arguments: input.arguments,
+          agent: input.agent,
+          model,
+          text,
+          control,
+        })
       }
       yield* Effect.logInfo("command", {
         "session.id": input.sessionID,

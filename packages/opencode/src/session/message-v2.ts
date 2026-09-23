@@ -38,7 +38,7 @@ import { errorMessage } from "@/util/error"
 import { isMedia } from "@/util/media"
 import type { SystemError } from "bun"
 import type { Provider } from "@/provider/provider"
-import { Effect, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
 
 /** Error shape thrown by Bun's fetch() when gzip/br decompression fails mid-stream */
 interface FetchDecompressionError extends Error {
@@ -637,6 +637,26 @@ export const get = Effect.fn("MessageV2.get")(function* (input: { sessionID: Ses
 })
 
 export const RoutingControl = "opencode.control.routing"
+
+export const RoutingControlMetadata = "opencode.routing"
+
+export const RoutingControlPayload = Schema.Struct({
+  scope: Schema.Union([Schema.Literal("same"), Schema.Literal("curated")]),
+  rootSessionID: Schema.String,
+  anchor: Schema.Struct({
+    providerID: Schema.String,
+    modelID: Schema.String,
+  }),
+})
+export type RoutingControlPayload = typeof RoutingControlPayload.Type
+
+const decodeRoutingControl = Schema.decodeUnknownOption(RoutingControlPayload)
+
+export function readRoutingControl(part: { metadata?: Record<string, unknown> } | undefined): RoutingControlPayload | undefined {
+  const raw = part?.metadata?.[RoutingControlMetadata]
+  if (raw === undefined) return undefined
+  return Option.getOrUndefined(decodeRoutingControl(raw))
+}
 
 // Message-level markers survive interruption before the separate part write.
 // Keep recognizing part markers on controls persisted before these markers existed.

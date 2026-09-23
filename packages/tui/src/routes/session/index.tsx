@@ -71,9 +71,9 @@ import * as Model from "../../util/model"
 import { formatTranscript } from "../../util/transcript"
 import { sessionEpilogue } from "../../util/presentation"
 import { setPreLayoutSiblingMargin } from "../../util/layout"
-import { useTuiConfig } from "../../config"
+import { TuiConfig, useTuiConfig } from "../../config"
 import { useClipboard } from "../../context/clipboard"
-import { nextThinkingMode, reasoningSummary, useThinkingMode, type ThinkingMode } from "../../context/thinking"
+import { briefedSummary, nextThinkingMode, reasoningSummary, resolveThinkingBriefAction, useThinkingMode, type ThinkingMode } from "../../context/thinking"
 import { getScrollAcceleration } from "../../util/scroll"
 import { collapseToolOutput } from "../../util/collapse-tool-output"
 import { usePluginRuntime } from "../../plugin/runtime"
@@ -769,6 +769,29 @@ export function Session() {
       },
       run: () => {
         thinking.set(nextThinkingMode(thinkingMode()))
+        dialog.clear()
+      },
+    },
+    {
+      title: thinkingMode() === "brief" ? "Turn reasoning briefs off" : "Turn reasoning briefs on",
+      value: "session.toggle.brief",
+      category: "Session",
+      slash: {
+        name: "thinking-brief",
+        aliases: ["toggle-brief"],
+      },
+      run: (ctx?: { payload?: unknown }) => {
+        const raw =
+          typeof (ctx?.payload as { args?: unknown } | undefined)?.args === "string"
+            ? ((ctx?.payload as { args?: unknown }).args as string)
+            : ""
+        const resolved = resolveThinkingBriefAction(raw, thinkingMode())
+        if (resolved.display) thinking.set(resolved.display)
+        void sdk.client.session.command({
+          sessionID: route.sessionID,
+          command: "thinking-brief",
+          arguments: resolved.forward,
+        })
         dialog.clear()
       },
     },
@@ -1729,19 +1752,21 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
 
   const inBrief = createMemo(() => ctx.thinkingMode() === "brief")
   const brief = createMemo(() => {
-    // Brief arrives only via the live event into the TUI store; the stored
-    // wire part has no brief field.
+    // Briefs arrive via the reasoning.brief event into the TUI store and are
+    // persisted onto the stored reasoning part, so they survive reload.
     const value = (props.part as ReasoningPart & { brief?: unknown }).brief
     return typeof value === "string" && value.trim() ? value.trim() : undefined
   })
+  // OpenRouter encrypts some reasoning blocks; drop the placeholder.
+  const raw = createMemo(() => props.part.text.replace("[REDACTED]", "").trim())
+  const rawSummary = createMemo(() => reasoningSummary(raw()))
   const content = createMemo(() => {
     // Brief mode shows the cheap post-turn brief when one arrived,
     // falling back to the raw block. Splitter behavior is unchanged.
     if (inBrief() && brief()) return brief() as string
-    // OpenRouter encrypts some reasoning blocks; drop the placeholder.
-    return props.part.text.replace("[REDACTED]", "").trim()
+    return raw()
   })
-  const opaque = createMemo(() => !content() && Boolean(props.part.metadata))
+  const opaque = createMemo(() => !raw() && Boolean(props.part.metadata))
   // Reasoning is finalized when the server sets `time.end` (see processor.ts).
   // Flips independently of the parent message completing.
   const isDone = createMemo(() => props.part.time.end !== undefined)
@@ -1750,11 +1775,17 @@ function ReasoningPart(props: { last: boolean; part: ReasoningPart; message: Ass
     const end = props.part.time.end
     return end === undefined ? 0 : Math.max(0, end - props.part.time.start)
   })
-  const summary = createMemo(() => reasoningSummary(content()))
+  // Brief mode keeps the raw title in the header with the brief as the body;
+  // blocks without a brief render raw exactly as in show mode. Availability
+  // stays raw-owned so title-only blocks are still declared-unavailable.
+  const summary = createMemo(() => {
+    if (inBrief() && brief()) return briefedSummary(raw(), brief())
+    return rawSummary()
+  })
   // A finalized title-only block is declared-unavailable, not streaming-pending.
   // A finalized zero-length block renders as redacted. Streaming empties stay hidden.
-  const unavailable = createMemo(() => isDone() && summary().kind === "title-only")
-  const redacted = createMemo(() => !unavailable() && !content() && (opaque() || isDone()))
+  const unavailable = createMemo(() => isDone() && rawSummary().kind === "title-only")
+  const redacted = createMemo(() => !unavailable() && !raw() && (opaque() || isDone()))
   const toggleable = createMemo(() => inMinimal() && Boolean(content()) && !unavailable())
   const syntax = createSyntaxStyleMemo(() => generateSubtleSyntax(theme))
 
