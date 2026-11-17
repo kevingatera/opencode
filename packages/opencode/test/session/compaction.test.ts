@@ -1000,9 +1000,144 @@ describe("session.compaction.process", () => {
         metadata: { compaction_continue: true },
       })
       if (last?.parts[0]?.type === "text") {
-        expect(last.parts[0].text).toContain("continue with its first Next Move step")
+        expect(last.parts[0].text).toContain("prefer the newer conversation over the summary's Next Move")
+        expect(last.parts[0].text).toContain("do not redo completed steps")
+        expect(last.parts[0].text).toContain("stop and wait for the user instead of restating the summary")
       }
     }),
+  )
+
+  itCompaction.instance(
+    "initial compaction prompt instructs duplicate collapse and test-supersession guard",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(
+        reply("summary", (input) => {
+          captured = JSON.stringify(input.messages)
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createUserMessage(session.id, "and this one too")
+        yield* createCompactionMarker(session.id)
+
+        const msgs = yield* ssn.messages({ sessionID: session.id })
+        const parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({
+          parentID: parent!,
+          messages: msgs,
+          sessionID: session.id,
+          auto: false,
+        })
+
+        expect(captured).toContain("collapse exact duplicates to a single occurrence")
+        expect(captured).toContain("Record each distinct command once with its outcome")
+        expect(captured).toContain("conclusion, reason, and final verified outcome only")
+        expect(captured).toContain("only with comparable scope, config, and revision plus an explicit resolution")
+        expect(captured).toContain("with its reason or verdict when known")
+        expect(captured).toContain("never invent an unknown reason")
+        expect(captured).toContain("Drop obsolete scratch inventory only when it is no longer needed")
+        expect(captured).toContain("[User]: older context")
+      }).pipe(
+        withCompaction({
+          llm: stub.llmLayer,
+          config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }),
+        }),
+      )
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "update compaction prompt instructs single-occurrence directives and test-supersession guard",
+    () => {
+      const stub = llm()
+      let captured = ""
+      stub.push(reply("summary one"))
+      stub.push(
+        reply("summary two", (input) => {
+          captured = JSON.stringify(input.messages)
+        }),
+      )
+      return Effect.gen(function* () {
+        const ssn = yield* SessionNs.Service
+        const session = yield* ssn.create({})
+        yield* createUserMessage(session.id, "older context")
+        yield* createUserMessage(session.id, "keep this turn")
+        yield* createCompactionMarker(session.id)
+
+        let msgs = yield* ssn.messages({ sessionID: session.id })
+        let parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        yield* createUserMessage(session.id, "latest turn")
+        yield* createCompactionMarker(session.id)
+
+        msgs = MessageV2.filterCompacted(yield* MessageV2.stream(session.id))
+        parent = msgs.at(-1)?.info.id
+        expect(parent).toBeTruthy()
+        yield* SessionCompaction.use.process({ parentID: parent!, messages: msgs, sessionID: session.id, auto: false })
+
+        expect(captured).toContain("<prior-summary>")
+        expect(captured).toContain("summary one")
+        expect(captured).toContain("as a single occurrence each")
+        expect(captured).toContain("only with comparable scope, config, and revision plus an explicit resolution")
+        expect(captured).toContain("with its reason or verdict when known")
+        expect(captured).toContain("never invent an unknown reason")
+        expect(captured).toContain("no uncommitted or deleted tracked state to report")
+      }).pipe(withCompaction({ llm: stub.llmLayer }))
+    },
+    { git: true },
+  )
+
+  itCompaction.instance(
+    "auto-continuation prompt prefers retained newer history over summary Next Move",
+    Effect.gen(function* () {
+      const ssn = yield* SessionNs.Service
+      const session = yield* ssn.create({})
+      yield* createUserMessage(session.id, "older context")
+      const keep = yield* createUserMessage(session.id, "middle retained step")
+      yield* createUserMessage(session.id, "newer retained step")
+      yield* createSummaryCompaction(session.id)
+
+      const msgs = yield* ssn.messages({ sessionID: session.id })
+      const parent = msgs.at(-1)?.info.id
+      expect(parent).toBeTruthy()
+      const result = yield* SessionCompaction.use.process({
+        parentID: parent!,
+        messages: msgs,
+        sessionID: session.id,
+        auto: true,
+      })
+
+      const all = yield* ssn.messages({ sessionID: session.id })
+      const last = all.at(-1)
+      const compaction = all
+        .flatMap((msg) => msg.parts.map((part) => ({ msg, part })))
+        .find((item) => item.part.type === "compaction")
+
+      expect(result).toBe("continue")
+      expect(compaction?.part.type).toBe("compaction")
+      if (compaction?.part.type === "compaction") {
+        expect(compaction.part.tail_start_id).toBe(keep.id)
+      }
+      expect(last?.info.role).toBe("user")
+      if (last?.parts[0]?.type === "text") {
+        expect(last.parts[0].text).toContain("retained conversation that follows it")
+        expect(last.parts[0].text).toContain("prefer the newer conversation over the summary's Next Move")
+        expect(last.parts[0].text).toContain("do not redo completed steps")
+        expect(last.parts[0].text).toContain("stop and wait for the user instead of restating the summary")
+        expect(last.parts[0].text).not.toContain("continue with its first Next Move step")
+      } else {
+        throw new Error("expected synthetic text continue prompt")
+      }
+    }).pipe(withCompaction({ config: cfg({ tail_turns: 2, preserve_recent_tokens: 10_000 }) })),
   )
 
   itCompaction.instance(
@@ -1197,8 +1332,7 @@ describe("session.compaction.process", () => {
           (msg) =>
             msg.info.role === "user" &&
             msg.parts.some(
-              (part) =>
-                part.type === "text" && part.synthetic && part.text.includes("continue with its first Next Move step"),
+              (part) => part.type === "text" && part.synthetic && part.text.includes("prefer the newer conversation"),
             ),
         ),
       ).toBe(false)
@@ -1266,6 +1400,7 @@ describe("session.compaction.process", () => {
       expect(last?.info.role).toBe("user")
       if (last?.parts[0]?.type === "text") {
         expect(last.parts[0].text).toContain("previous request exceeded the provider's size limit")
+        expect(last.parts[0].text).toContain("prefer the newer conversation over the summary's Next Move")
       }
     }),
   )
@@ -1718,6 +1853,24 @@ describe("session.compaction.process", () => {
         sessionID: session.id,
         type: "text",
         text: "recent reply",
+      })
+      // Three new assistant messages after the previous summary stand the
+      // re-compaction loop guard down, so this still exercises sizing only.
+      const followupReply = yield* createAssistantMessage(session.id, recent.id, test.directory)
+      yield* ssn.updatePart({
+        id: PartID.ascending(),
+        messageID: followupReply.id,
+        sessionID: session.id,
+        type: "text",
+        text: "followup reply",
+      })
+      const finalReply = yield* createAssistantMessage(session.id, recent.id, test.directory)
+      yield* ssn.updatePart({
+        id: PartID.ascending(),
+        messageID: finalReply.id,
+        sessionID: session.id,
+        type: "text",
+        text: "final reply",
       })
 
       yield* createCompactionMarker(session.id)

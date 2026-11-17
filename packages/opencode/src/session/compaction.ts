@@ -12,8 +12,9 @@ import { Agent } from "@/agent/agent"
 import { Plugin } from "@/plugin"
 import { Config } from "@/config/config"
 import { NotFoundError } from "@/storage/storage"
+import { CommandFamily } from "@/tool/shell/command-family"
 
-import { Effect, Layer, Context } from "effect"
+import { Effect, Layer, Context, Option } from "effect"
 import { InstanceState } from "@/effect/instance-state"
 import { isOverflow as overflow, usable } from "./overflow"
 import { serviceUse } from "@opencode-ai/core/effect/service-use"
@@ -30,12 +31,17 @@ export const PRUNE_MINIMUM = 20_000
 export const PRUNE_PROTECT = 40_000
 const TOOL_OUTPUT_MIN_CHARS = 2_000
 const TOOL_OUTPUT_MAX_CHARS = 12_000
-const PRUNE_PROTECTED_TOOLS = ["skill"]
 const MIN_PRESERVE_RECENT_TOKENS = 2_000
 // Recent work is the most likely to be referenced next; the old 15k cap squeezed the
 // final stretch of long sessions into the summarizer, where dropped details are lost
 // entirely (they are in neither the verbatim tail nor the summary).
 const MAX_PRESERVE_RECENT_TOKENS = 40_000
+// Token.estimate measures JSON chars/4, which undercounts tool-heavy tails by ~1.3-1.9x.
+// Target the estimate at budget / TAIL_ESTIMATE_SAFETY so the real provider size fits.
+const TAIL_ESTIMATE_SAFETY = 1.5
+// A compaction that follows a previous summary with almost no new assistant work means
+// the last tail was too big to prevent another overflow; shrink again instead of looping.
+const LOOP_GUARD_ASSISTANT_MESSAGES = 3
 type Turn = {
   start: number
   end: number
@@ -92,7 +98,7 @@ const serialize = (message: SessionV1.WithParts, toolBudget: number) => {
           (item) => `[Attached ${item.mime}: ${item.filename ?? "file"}]`,
         )
         const output = part.state.time.compacted
-          ? "[Old tool result content cleared]"
+          ? MessageV2.prunedToolStub(part.tool, part.state.input, part.state.output.length, part.state.metadata)
           : truncate([part.state.output, ...attachments].join("\n"), toolBudget)
         return [call, `[Tool result]: ${output}`]
       }
@@ -128,6 +134,24 @@ function completedCompactions(messages: SessionV1.WithParts[]) {
     if (userIndex === undefined) return []
     return [{ userIndex, assistantIndex, summary: summaryText(msg) }]
   })
+}
+
+function isRapidRecompaction(input: { messages: SessionV1.WithParts[]; prior: CompletedCompaction[] }) {
+  const previous = input.prior.at(-1)
+  if (!previous) return false
+  const summary = input.messages[previous.assistantIndex]?.info
+  if (!summary || summary.role !== "assistant") return false
+  // Array position is not chronological: filterCompacted reorders to
+  // [compaction-user, summary, ...retained tail..., newer...], so only count
+  // assistants created after the summary (time.created, id tie-break).
+  const assistants = input.messages.filter(
+    (msg) =>
+      msg.info.role === "assistant" &&
+      !msg.info.summary &&
+      (msg.info.time.created > summary.time.created ||
+        (msg.info.time.created === summary.time.created && msg.info.id > summary.id)),
+  ).length
+  return assistants < LOOP_GUARD_ASSISTANT_MESSAGES
 }
 
 function preserveRecentBudget(input: { cfg: ConfigV1.Info; model: Provider.Model }) {
@@ -178,6 +202,36 @@ function splitTurn(input: {
     }
     return undefined
   })
+}
+
+// Pruning clears an output from future replays, so results the model acts on directly (edits,
+// skills, subagent results) are never cleared.
+const PRUNE_NEVER_TOOLS = ["skill", "edit", "write", "apply_patch", "task"]
+const PRUNE_BULKY_TOOLS = ["read", "webfetch", "glob", "grep"]
+// Failure markers in check output. Only consulted for runs the shared classifier calls checks.
+const CHECK_FAILURE = /\b[1-9]\d*\s+(?:fail|failed|failing|errors?)\b|\bFAIL\b|error TS\d+|\(fail\)|AssertionError|panicked/
+// Pruning rewrites old parts, which invalidates the provider's prompt-prefix cache from the first
+// rewritten part onward. Below this share of the usable window there is no near-term pressure to
+// pay that cost, so pruning waits until the context is at least half full.
+const PRUNE_CONTEXT_RATIO = 0.5
+
+type PruneKind = "keep" | "bulky" | "other"
+
+function pruneKind(part: SessionV1.ToolPart): PruneKind {
+  if (part.state.status !== "completed") return "keep"
+  if (PRUNE_NEVER_TOOLS.includes(part.tool)) return "keep"
+  if (PRUNE_BULKY_TOOLS.includes(part.tool)) return "bulky"
+  const command = part.state.input.command
+  if (part.tool !== "bash" || typeof command !== "string") return "other"
+  // A failed command's output is the evidence the next step works from, whatever the command was.
+  const exit = part.state.metadata.exit
+  if (typeof exit === "number" && exit !== 0) return "keep"
+  const family = CommandFamily.classify(command)
+  if (family === "check") {
+    // Failures can hide behind exit 0 (runners that only print); only a clean run is bulk.
+    return exit === 0 && !CHECK_FAILURE.test(part.state.output) ? "bulky" : "keep"
+  }
+  return family === "dump" ? "bulky" : "other"
 }
 
 export interface Interface {
@@ -243,16 +297,22 @@ const layer = Layer.effect(
       messages: SessionV1.WithParts[]
       cfg: ConfigV1.Info
       model: Provider.Model
+      loopGuard?: boolean
     }) {
       const limit = input.cfg.compaction?.tail_turns
-      if (limit !== undefined && limit <= 0) return { head: input.messages, tail_start_id: undefined }
-      const budget = preserveRecentBudget({ cfg: input.cfg, model: input.model })
-      const all = turns(input.messages)
-      if (!all.length) return { head: input.messages, tail_start_id: undefined }
+      const disabled = limit !== undefined && limit <= 0
+      const budget = disabled ? 0 : preserveRecentBudget({ cfg: input.cfg, model: input.model })
+      const safety = Math.floor(budget / TAIL_ESTIMATE_SAFETY)
+      const loopGuard = !disabled && input.loopGuard === true
+      const effective = loopGuard ? Math.floor(safety / 2) : safety
+      const blocked = disabled || (loopGuard && effective < MIN_PRESERVE_RECENT_TOKENS)
+      const all = blocked ? [] : turns(input.messages)
       const recent = limit === undefined ? all : all.slice(-limit)
 
       let total = 0
       let keep: Tail | undefined
+      let keptTurns = 0
+      let fallbackSize = 0
       for (let i = recent.length - 1; i >= 0; i--) {
         const turn = recent[i]!
         // estimate lazily so cost stays proportional to the retained tail, not the whole session
@@ -260,12 +320,13 @@ const layer = Layer.effect(
           messages: input.messages.slice(turn.start, turn.end),
           model: input.model,
         })
-        if (total + size <= budget) {
+        if (total + size <= effective) {
           total += size
+          keptTurns += 1
           keep = { start: turn.start, id: turn.id }
           continue
         }
-        const remaining = budget - total
+        const remaining = effective - total
         const split = yield* splitTurn({
           messages: input.messages,
           turn,
@@ -273,25 +334,62 @@ const layer = Layer.effect(
           budget: remaining,
           estimate,
         })
-        if (split) keep = split
-        else if (!keep) {
-          yield* Effect.logInfo("tail fallback", { budget, size, total })
+        if (split) {
+          keep = split
+          keptTurns += 1
+          total += yield* estimate({
+            messages: input.messages.slice(split.start, turn.end),
+            model: input.model,
+          })
+        } else if (!keep) {
+          fallbackSize = size
         }
         break
       }
 
-      if (!keep || keep.start === 0) return { head: input.messages, tail_start_id: undefined }
+      const tailStart = keep === undefined || keep.start === 0 ? undefined : keep.id
+      yield* Effect.logInfo("tail select", {
+        budget,
+        effectiveBudget: effective,
+        keptSize: tailStart === undefined ? 0 : total,
+        keptTurns: tailStart === undefined ? 0 : keptTurns,
+        tail_start_id: tailStart,
+        loopGuard,
+        fallbackSize,
+      })
+      if (keep === undefined || keep.start === 0) return { head: input.messages, tail_start_id: undefined }
       return {
         head: input.messages.slice(0, keep.start),
         tail_start_id: keep.id,
       }
     })
 
+    // Whether the last step left the context at least PRUNE_CONTEXT_RATIO full. Reported usage and
+    // the tool-output estimate are both lower bounds on the real context, so the larger wins; this
+    // also covers assistant messages that carry no usage. An unknown window never blocks pruning.
+    const contextPressure = Effect.fn("SessionCompaction.contextPressure")(function* (input: {
+      cfg: ConfigV1.Info
+      msgs: SessionV1.WithParts[]
+      toolTokens: number
+    }) {
+      const last = input.msgs.findLast((msg) => msg.info.role === "assistant")?.info
+      if (last?.role !== "assistant") return true
+      const model = Option.getOrUndefined(yield* provider.getModel(last.providerID, last.modelID).pipe(Effect.option))
+      if (!model) return true
+      const window = usable({ cfg: input.cfg, model })
+      if (window === 0) return true
+      const reported =
+        last.tokens.total || last.tokens.input + last.tokens.output + last.tokens.cache.read + last.tokens.cache.write
+      return Math.max(reported, input.toolTokens) >= window * PRUNE_CONTEXT_RATIO
+    })
+
     // goes backwards through parts until there are PRUNE_PROTECT tokens worth of tool
-    // calls, then erases output of older tool calls to free context space
+    // calls, then erases output of older tool calls to free context space. Bulky, cheaply
+    // re-fetchable outputs (whole-file reads, dumps, passing test logs) go first; other
+    // outputs are only cleared, oldest first, when bulk alone does not reach PRUNE_MINIMUM.
     const prune = Effect.fn("SessionCompaction.prune")(function* (input: { sessionID: SessionID }) {
       const cfg = yield* config.get()
-      if (!cfg.compaction?.prune) return
+      if (!(cfg.compaction?.prune ?? true)) return
       yield* Effect.logInfo("pruning")
 
       const msgs = yield* session
@@ -300,9 +398,10 @@ const layer = Layer.effect(
       if (!msgs) return
 
       let total = 0
-      let pruned = 0
-      const toPrune: SessionV1.ToolPart[] = []
       let turns = 0
+      // newest first, because the walk goes backwards
+      const bulky: { part: SessionV1.ToolPart; tokens: number }[] = []
+      const other: { part: SessionV1.ToolPart; tokens: number }[] = []
 
       loop: for (let msgIndex = msgs.length - 1; msgIndex >= 0; msgIndex--) {
         const msg = msgs[msgIndex]
@@ -314,22 +413,40 @@ const layer = Layer.effect(
           const part = msg.parts[partIndex]
           if (part.type !== "tool") continue
           if (part.state.status !== "completed") continue
-          if (PRUNE_PROTECTED_TOOLS.includes(part.tool)) continue
-          if (part.state.time.compacted) break loop
-          const estimate = Token.estimate(part.state.output)
-          total += estimate
+          // Not a stop condition: with selective pruning, older uncleared outputs can sit
+          // behind an already-cleared one. A cleared stub is not worth counting.
+          if (part.state.time.compacted) continue
+          if (part.tool === "skill") continue
+          const tokens = Token.estimate(part.state.output)
+          total += tokens
           if (total <= PRUNE_PROTECT) continue
-          pruned += estimate
-          toPrune.push(part)
+          // Never-prune outputs still fill the protect window; they are just never selected.
+          const kind = pruneKind(part)
+          if (kind === "keep") continue
+          if (kind === "bulky") bulky.push({ part, tokens })
+          else other.push({ part, tokens })
         }
       }
 
-      yield* Effect.logInfo("found", { pruned, total })
+      const bulkyTokens = bulky.reduce((sum, item) => sum + item.tokens, 0)
+      const toPrune = [...bulky]
+      let pruned = bulkyTokens
+      for (const item of other.toReversed()) {
+        if (pruned > PRUNE_MINIMUM) break
+        toPrune.push(item)
+        pruned += item.tokens
+      }
+
+      yield* Effect.logInfo("found", { pruned, bulky: bulkyTokens, total })
       if (pruned > PRUNE_MINIMUM) {
-        for (const part of toPrune) {
-          if (part.state.status === "completed") {
-            part.state.time.compacted = Date.now()
-            yield* session.updatePart(part)
+        if (!(yield* contextPressure({ cfg, msgs, toolTokens: total }))) {
+          yield* Effect.logInfo("prune deferred", { pruned })
+          return
+        }
+        for (const item of toPrune) {
+          if (item.part.state.status === "completed") {
+            item.part.state.time.compacted = Date.now()
+            yield* session.updatePart(item.part)
           }
         }
         yield* Effect.logInfo("pruned", { count: toPrune.length })
@@ -393,6 +510,7 @@ const layer = Layer.effect(
         messages: history.filter((_, index) => !hidden.has(index)),
         cfg,
         model,
+        loopGuard: input.auto && isRapidRecompaction({ messages: history, prior }),
       })
       // Allow plugins to inject context or replace compaction prompt.
       const compacting = yield* plugin.trigger(
@@ -554,7 +672,7 @@ const layer = Layer.effect(
               (input.overflow
                 ? "The previous request exceeded the provider's size limit due to large media attachments. The conversation was compacted and media files were removed from context. If the user was asking about attached images or files, explain that the attachments were too large to process and suggest they try again with smaller or fewer files.\n\n"
                 : "") +
-              "Review the summary above and continue with its first Next Move step. If no next step is actionable, stop and wait for the user instead of restating the summary."
+              "Review the summary above and the retained conversation that follows it. Continue from the latest state: prefer the newer conversation over the summary's Next Move when they differ, do not redo completed steps, and if no next step is actionable stop and wait for the user instead of restating the summary."
             yield* session.updatePart({
               id: PartID.ascending(),
               messageID: continueMsg.id,

@@ -24,10 +24,40 @@ test("compaction prompt gives update instructions for a prior summary", () => {
   expect(prompt.indexOf("<conversation>")).toBeLessThan(prompt.indexOf("<prior-summary>"))
   expect(prompt.indexOf("</prior-summary>")).toBeLessThan(prompt.indexOf("The <prior-summary> summarizes"))
   expect(prompt).toContain(
-    "Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary>",
+    "Carry forward objectives, constraints, user directives, decisions with their reasons, and parallel workstreams from the <prior-summary>",
   )
   expect(prompt).toContain('Move completed work from "Active" to "Completed".')
   expect(prompt).toContain('Update "Objective" and "Next Move" to reflect the current work state.')
+})
+
+test("compaction prompt instructs duplicate collapse and evidence preservation", () => {
+  const prompt = SessionCompaction.buildPrompt({ context: ["conversation history"] })
+
+  expect(prompt).toContain("collapse exact duplicates to a single occurrence")
+  expect(prompt).toContain("Record each distinct command once with its outcome")
+  expect(prompt).toContain("conclusion, reason, and final verified outcome only")
+  expect(prompt).toContain("only with comparable scope, config, and revision plus an explicit resolution")
+  expect(prompt).toContain(
+    "preserve unresolved, flaky, and excluded test evidence with its reason or verdict when known",
+  )
+  expect(prompt).toContain("never invent an unknown reason")
+  expect(prompt).toContain("Drop obsolete scratch inventory only when it is no longer needed")
+})
+
+test("compaction update prompt instructs single-occurrence directives and test-supersession guard", () => {
+  const prompt = SessionCompaction.buildPrompt({
+    context: ["new conversation"],
+    previousSummary: "existing summary",
+  })
+
+  expect(prompt).toContain('Carry "Standing User Directives" forward verbatim as a single occurrence each')
+  expect(prompt).toContain("Record resolved investigations as conclusion, reason, and final verified outcome only")
+  expect(prompt).toContain("only with comparable scope, config, and revision plus an explicit resolution")
+  expect(prompt).toContain(
+    "preserve unresolved, flaky, and excluded test evidence with its reason or verdict when known",
+  )
+  expect(prompt).toContain("never invent an unknown reason")
+  expect(prompt).toContain("no uncommitted or deleted tracked state to report")
 })
 
 test("compaction describes tool media without embedding base64", () => {

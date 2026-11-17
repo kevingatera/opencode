@@ -19,10 +19,10 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 - [one or two brief sentences describing what the user is trying to accomplish]
 
 ## Standing User Directives
-- [persistent user constraints, preferences, or scope limits that affect how the agent works, quoted verbatim; or "(none)"]
+- [only the essential persistent user constraints, preferences, or scope limits that affect how the agent works, quoted verbatim, at most ~1,500 characters in total; in a subagent session quote the task brief once here instead of restating it per bullet; or "(none)"]
 
 ## Important Details
-- [decisions and why, hard-won findings stated as conclusions with one-line evidence, adjudicated flakes or failures with their verdict, important facts/assumptions, exact context needed to continue, or "(none)"]
+- [decisions and why, hard-won findings stated as conclusions with one-line evidence, adjudicated flakes or failures with their verdict, important facts/assumptions, exact context needed to continue, skills already loaded in this session by name each marked "already loaded; do not reload", or "(none)"]
 
 ## Work State
 ### Completed
@@ -39,7 +39,7 @@ const SUMMARY_TEMPLATE = `Output exactly the Markdown structure shown inside <te
 2. [next action if known, or "(none)"]
 
 ## Relevant Files
-- [file or directory path: what changed in it, or what was learned from reading it, and why it matters; or "(none)"]
+- [for each file the next step will read or edit: path:line-range with the key symbol(s) there, so the next turn can read only that range; for other files or directories: path: what changed in it, or what was learned from reading it, and why it matters; or "(none)"]
 
 ## Subagents
 - [<agent or task description>: task/session ID (ses_...) verbatim if known, status (completed/pending/failed), whether resuming it would help, and any pending external state (authorizations, approvals, loaded skills); otherwise "(none)"]
@@ -51,21 +51,28 @@ Rules:
 - Preserve exact file paths, symbols, commands, error strings, URLs, and identifiers when known.
 - Never invent details: do not state file contents, counts, dates, or results that are not in the conversation. If a detail is uncertain or missing, omit it rather than reconstructing it.
 - Describe file contents only when the conversation actually shows them in a tool result; for files that were never displayed, record only the path and why it matters.
-- Quote user directives verbatim in "Standing User Directives"; never paraphrase them.
-- Record the outcome next to each significant command - a command without its recorded result will be re-run.
+- Quote each distinct user directive verbatim once in "Standing User Directives"; collapse exact duplicates to a single occurrence and never paraphrase them.
+- Record each distinct command once with its outcome next to it; record resolved investigations as conclusion, reason, and final verified outcome only.
+- A newer test result supersedes an older one only with comparable scope, config, and revision plus an explicit resolution; otherwise preserve unresolved, flaky, and excluded test evidence with its reason or verdict when known; never invent an unknown reason.
 - The end of the conversation is the most recent and most important state: describe the final stretch of work in the most detail.
-- Under "Relevant Files", list every file the conversation created, modified, or deleted, with its change state, plus any files needed for the next step.
+- Under "Relevant Files", list every file the conversation created, modified, or deleted, with its change state, plus any files needed for the next step. Drop obsolete scratch inventory only when it is no longer needed and has no uncommitted or deleted tracked state to report.
+- List each file the next step will read or edit as \`path:line-range\` with its key symbol(s), taken from line numbers the conversation actually showed; if the range is unknown, give the path and symbol only and do not invent line numbers.
+- Keep "Standing User Directives" to the essential directives, quoted verbatim, capped at ~1,500 characters in total. When the cap forces a choice, drop the least essential directive instead of paraphrasing. In a subagent session, quote the task brief once instead of restating it in every bullet.
+- Target ~6,000-8,000 characters for the whole summary. Cut narrative and resolved detail before cutting file:line pointers, directives, or next steps.
+- Record each skill already loaded in this session by name, marked "already loaded; do not reload".
 - Preserve subagent task/session IDs (ses_...) verbatim so the next agent can resume those subagents.
 - Record the state of uncommitted work: which files were modified, and whether changes are staged, unstaged, or committed (include the commit hash when known).
 - Do not mention the summary process or that context was compacted.`
 const SUMMARY_UPDATE_INSTRUCTIONS = `The <prior-summary> summarizes everything that happened before the <conversation>. Construct a new summary that combines both. The <prior-summary> is discarded after this: anything you do not carry into the new summary is lost.
 
 When combining:
-- Carry forward objectives, constraints, user directives, decisions, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
+- Carry forward objectives, constraints, user directives, decisions with their reasons, and parallel workstreams from the <prior-summary> even when the <conversation> does not mention them. Drop only what is finished and no longer needed.
 - Carry forward file change states (modified/staged/committed) and verification results until the <conversation> shows they changed.
 - Carry forward subagent task/session IDs and their status until the subagent is finished or no longer resumable.
-- Carry "Standing User Directives" forward verbatim; drop a directive only when the user explicitly reverses it.
-- Carry forward adjudicated findings and flake verdicts; do not re-litigate them.
+- Carry "Standing User Directives" forward verbatim as a single occurrence each; drop a directive only when the user explicitly reverses it or the ~1,500-character cap forces out the least essential one.
+- Carry forward the skills already loaded, by name, marked "already loaded; do not reload", and update the \`path:line-range\` entries in "Relevant Files" to the ranges the next step needs. Keep the whole summary within ~6,000-8,000 characters.
+- Carry forward adjudicated findings and flake verdicts; do not re-litigate them. Record resolved investigations as conclusion, reason, and final verified outcome only.
+- A newer test result supersedes an older one only with comparable scope, config, and revision plus an explicit resolution; otherwise preserve unresolved, flaky, and excluded test evidence with its reason or verdict when known; never invent an unknown reason. Drop obsolete scratch files only when unneeded and with no uncommitted or deleted tracked state to report.
 - The <conversation> is more recent than the <prior-summary>. Where they conflict, the conversation wins: state the corrected fact and drop the old claim.
 - Add new progress, decisions, constraints, and context from the conversation.
 - Move completed work from "Active" to "Completed".

@@ -48,12 +48,67 @@ interface FetchDecompressionError extends Error {
 }
 
 export const SYNTHETIC_ATTACHMENT_PROMPT = "Attached media from tool result:"
+export const SYNTHETIC_CONTINUE_PROMPT = "Continue."
 export { isMedia }
 
 function truncateToolOutput(text: string, maxChars?: number) {
   if (!maxChars || text.length <= maxChars) return text
   const omitted = text.length - maxChars
   return `${text.slice(0, maxChars)}\n[Tool output truncated for compaction: omitted ${omitted} chars]`
+}
+
+const STUB_SUBJECT_CHARS = 80
+const STUB_PATH_CHARS = 90
+
+const clip = (value: string) =>
+  value.length > STUB_SUBJECT_CHARS ? `${value.slice(0, STUB_SUBJECT_CHARS - 1)}…` : value
+
+// A saved-output path is only useful whole at its ends (directory root and file name), so
+// long paths lose their middle instead of their tail.
+const clipMiddle = (value: string) => {
+  if (value.length <= STUB_PATH_CHARS) return value
+  const keep = STUB_PATH_CHARS - 1
+  return `${value.slice(0, Math.ceil(keep / 2))}…${value.slice(-Math.floor(keep / 2))}`
+}
+
+// Replaces a pruned tool output when it is replayed. Tells the model what was there and how to
+// get it back cheaply, instead of a generic placeholder it can only answer by re-running blindly.
+// Truncated outputs that the tool saved to disk point at that file, which is cheaper to read
+// than re-running the command.
+export function prunedToolStub(
+  tool: string,
+  input: Record<string, unknown>,
+  outputChars: number,
+  metadata?: Record<string, unknown>,
+) {
+  const size = outputChars < 1_000 ? `${outputChars} chars` : `${Math.round(outputChars / 1_000)}K chars`
+  const saved = typeof metadata?.outputPath === "string" ? metadata.outputPath : undefined
+  const savedHint = saved === undefined ? undefined : `Full output: ${clipMiddle(saved)} — read it with offset/limit`
+  const stub = (subject: string, hint?: string) => {
+    const tail = savedHint ?? hint
+    return `[Pruned: ${subject} (${size})${tail === undefined ? "" : `. ${tail}`}]`
+  }
+  const filePath = input.filePath
+  if (tool === "read" && typeof filePath === "string") {
+    const offset = typeof input.offset === "number" ? input.offset : undefined
+    const limit = typeof input.limit === "number" ? input.limit : undefined
+    const range =
+      limit !== undefined
+        ? ` lines ${offset ?? 1}-${(offset ?? 1) + limit - 1}`
+        : offset !== undefined
+          ? ` from line ${offset}`
+          : ""
+    return stub(`read ${clip(filePath)}${range}`, "Re-read with offset/limit if needed")
+  }
+  const command = input.command
+  if (tool === "bash" && typeof command === "string")
+    return stub(`bash "${clip(command.replace(/\s+/g, " ").trim())}"`)
+  const url = input.url
+  if (tool === "webfetch" && typeof url === "string") return stub(`webfetch ${clip(url)}`, "Fetch again if needed")
+  const pattern = input.pattern
+  if ((tool === "glob" || tool === "grep") && typeof pattern === "string")
+    return stub(`${tool} "${clip(pattern)}"`, "Re-run if needed")
+  return stub(`${tool} output`)
 }
 
 function recoveredTaskOutput(part: ToolPart, message: Assistant) {
@@ -73,7 +128,7 @@ function recoveredTaskOutput(part: ToolPart, message: Assistant) {
 function toolOutputText(part: ToolPart, maxChars?: number) {
   if (part.state.status === "completed") {
     const output = part.state.time.compacted
-      ? "[Old tool result content cleared]"
+      ? prunedToolStub(part.tool, part.state.input, part.state.output.length, part.state.metadata)
       : truncateToolOutput(part.state.output, maxChars)
     return `Historical output from the ${part.state.title ?? part.tool} tool:\n${output}`
   }
@@ -232,6 +287,10 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 ) {
   const result: UIMessage[] = []
   const toolNames = new Set<string>()
+  // Set when an errored assistant turn is dropped from the replay. After a
+  // failover the surviving history can then end on an assistant message, which
+  // Anthropic-style endpoints reject as prefill. See the end of this function.
+  let skippedErroredTurn = false
   // Track media from tool results that need to be injected as user messages
   // for providers that don't support that media type in tool results.
   //
@@ -354,6 +413,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           msg.parts.some((part) => part.type !== "step-start" && part.type !== "reasoning")
         )
       ) {
+        skippedErroredTurn = true
         continue
       }
       const assistantMessage: UIMessage = {
@@ -408,7 +468,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
           toolNames.add(part.tool)
           if (part.state.status === "completed") {
             const outputText = part.state.time.compacted
-              ? "[Old tool result content cleared]"
+              ? prunedToolStub(part.tool, part.state.input, part.state.output.length, part.state.metadata)
               : truncateToolOutput(part.state.output, options?.toolOutputMaxChars)
             const attachments = part.state.time.compacted || options?.stripMedia ? [] : (part.state.attachments ?? [])
 
@@ -520,7 +580,7 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
 
   const tools = Object.fromEntries(Array.from(toolNames).map((toolName) => [toolName, { toModelOutput }]))
 
-  return yield* Effect.promise(() =>
+  const messages = yield* Effect.promise(() =>
     convertToModelMessages(
       result.filter((msg) => msg.parts.some((part) => part.type !== "step-start")),
       {
@@ -529,6 +589,14 @@ export const toModelMessagesEffect = Effect.fnUntraced(function* (
       },
     ),
   )
+
+  // The failed turn was the one the user message was waiting on, so the
+  // continuation must still end on a user turn. Nothing in the codebase sends a
+  // deliberate assistant prefill. Histories with no dropped error turn, no user
+  // message at all, or that already end in user/tool are returned untouched.
+  if (!skippedErroredTurn || messages.at(-1)?.role !== "assistant") return messages
+  if (!messages.some((msg) => msg.role === "user")) return messages
+  return [...messages, { role: "user" as const, content: [{ type: "text" as const, text: SYNTHETIC_CONTINUE_PROMPT }] }]
 })
 
 export function toModelMessages(

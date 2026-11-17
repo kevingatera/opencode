@@ -1111,7 +1111,7 @@ describe("session.message-v2.toModelMessage", () => {
             type: "tool-result",
             toolCallId: "call-1",
             toolName: "bash",
-            output: { type: "text", value: "[Old tool result content cleared]" },
+            output: { type: "text", value: "[Pruned: bash output (22 chars)]" },
           },
         ],
       },
@@ -1727,6 +1727,59 @@ describe("session.message-v2.toModelMessage", () => {
     expect(result).toHaveLength(1)
     const texts = (result[0].content as any[]).filter((p) => p.type === "text")
     expect(texts.map((t) => t.text)).toStrictEqual(["", "hello"])
+  })
+
+  test("replays foreign-provider tools and reasoning as text after a provider switch", async () => {
+    // A resumed child that switched providers keeps turns recorded under the
+    // old provider. Foreign tools must replay as text (no dangling tool_use),
+    // and reasoning must degrade to text rather than signed blocks.
+    const userID = "m-user-switch"
+    const assistantID = "m-assistant-switch"
+    const input: SessionV1.WithParts[] = [
+      {
+        info: userInfo(userID),
+        parts: [
+          {
+            ...basePart(userID, "u1"),
+            type: "text",
+            text: "run tool",
+          },
+        ] as SessionV1.Part[],
+      },
+      {
+        info: {
+          ...assistantInfo(assistantID, userID),
+          providerID: ProviderV2.ID.make("old"),
+          modelID: ModelV2.ID.make("old-model"),
+          finish: "stop",
+          time: { created: 0, completed: 1 },
+        },
+        parts: [
+          { ...basePart(assistantID, "p1"), type: "reasoning", text: "thinking" },
+          {
+            ...basePart(assistantID, "p2"),
+            type: "tool",
+            callID: "call-1",
+            tool: "bash",
+            state: {
+              status: "completed",
+              input: { cmd: "ls" },
+              output: "file.txt",
+              title: "Bash",
+              metadata: {},
+              time: { start: 0, end: 1 },
+            },
+          },
+        ] as SessionV1.Part[],
+      },
+    ]
+
+    const result = await MessageV2.toModelMessages(input, model)
+    const serialized = JSON.stringify(result)
+    expect(serialized).not.toContain("toolCallId")
+    expect(serialized).toContain("Historical output from the Bash tool")
+    expect(serialized).toContain("file.txt")
+    expect(serialized).toContain("thinking")
   })
 })
 
