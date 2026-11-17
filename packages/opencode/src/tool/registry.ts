@@ -10,6 +10,7 @@ import { GlobTool } from "./glob"
 import { GrepTool } from "./grep"
 import { ReadTool } from "./read"
 import { TaskTool } from "./task"
+import { ModelsTool } from "./models"
 import { Database } from "@opencode-ai/core/database/database"
 import { TodoWriteTool } from "./todo"
 import { WebFetchTool } from "./webfetch"
@@ -55,6 +56,8 @@ import { MCP } from "@/mcp"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { McpCatalog } from "@/mcp/catalog"
 import { ModelRouting } from "@/session/model-routing"
+import { SessionRunState } from "@/session/run-state"
+import { Global } from "@opencode-ai/core/global"
 
 export function webSearchEnabled(providerID: ProviderV2.ID, flags = { exa: false, parallel: false }) {
   return (
@@ -101,6 +104,7 @@ const layer = Layer.effect(
 
     const invalid = yield* InvalidTool
     const task = yield* TaskTool
+    const models = yield* ModelsTool
     const read = yield* ReadTool
     const question = yield* QuestionTool
     const todo = yield* TodoWriteTool
@@ -216,6 +220,7 @@ const layer = Layer.effect(
           edit: Tool.init(edit),
           write: Tool.init(writetool),
           task: Tool.init(task),
+          models: Tool.init(models),
           fetch: Tool.init(webfetch),
           todo: Tool.init(todo),
           search: Tool.init(websearch),
@@ -239,6 +244,7 @@ const layer = Layer.effect(
             tool.edit,
             tool.write,
             tool.task,
+            tool.models,
             tool.fetch,
             tool.todo,
             tool.search,
@@ -430,6 +436,8 @@ export const node = LayerNode.make({
   layer,
   deps: [
     ModelRouting.node,
+    SessionRunState.node,
+    Global.node,
     Config.node,
     Plugin.node,
     Question.node,

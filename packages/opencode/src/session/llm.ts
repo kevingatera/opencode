@@ -19,6 +19,8 @@ import { Plugin } from "@/plugin"
 import { Permission } from "@/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { EventV2 } from "@opencode-ai/core/event"
+import { ProviderV2 } from "@opencode-ai/core/provider"
+import { ModelV2 } from "@opencode-ai/core/model"
 import { Wildcard } from "@/util/wildcard"
 import { SessionID } from "@/session/schema"
 import { Auth } from "@/auth"
@@ -46,6 +48,11 @@ export type StreamInput = {
   tools: Record<string, Tool>
   retries?: number
   toolChoice?: "auto" | "required" | "none"
+  // Failover steering for the legacy SessionPrompt runner: when a turn retries
+  // on the next permitted routing candidate after a provider failure, the
+  // LLM-boundary check validates that candidate instead of the role default.
+  // Absent on normal turns, so the default selection still applies.
+  routingOverride?: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
 }
 
 export type StreamRequest = StreamInput & {
@@ -91,6 +98,12 @@ const live: Layer.Layer<
         role: input.agent.name,
         model: { providerID: input.model.providerID, modelID: input.model.id },
         auxiliary: input.small || input.agent.name === "compaction" || input.agent.name === "summary" || input.agent.name === "reasoning-brief",
+        override: input.routingOverride,
+        // A failover retry validates the selected candidate without
+        // persisting it: the pin (and any repointed recorded override) was
+        // already written atomically by the failover itself, and same-provider
+        // retries must leave explicit overrides authoritative for later turns.
+        preview: input.routingOverride ? true : undefined,
       })
       yield* Effect.logInfo("stream", {
         providerID: input.model.providerID,

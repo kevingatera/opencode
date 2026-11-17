@@ -21,7 +21,8 @@ import { Truncate } from "@/tool/truncate"
 import { ToolRegistry } from "@/tool/registry"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { disposeAllInstances } from "../fixture/fixture"
-import { testEffect } from "../lib/effect"
+import { pollWithTimeout, testEffect } from "../lib/effect"
+import { Storage } from "@/storage/storage"
 import { ProviderV2 } from "@opencode-ai/core/provider"
 import { ModelV2 } from "@opencode-ai/core/model"
 import { ModelRouting } from "@/session/model-routing"
@@ -48,6 +49,7 @@ const layer = (flags: Partial<RuntimeFlags.Info> = {}) =>
       SessionProjector.node,
       SessionRunState.node,
       SessionStatus.node,
+      Storage.node,
       Truncate.node,
       ToolRegistry.node,
       Database.node,
@@ -291,7 +293,15 @@ describe("tool.task", () => {
           .pipe(Effect.exit)
         expect(calls).toBe(0)
         expect(Exit.isFailure(exit)).toBe(true)
-        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("child pinned to other")
+        if (Exit.isFailure(exit)) {
+          const cause = Cause.pretty(exit.cause)
+          expect(cause).toContain("child pinned to other")
+          expect(cause).toContain("test/test-model")
+          expect(cause).toContain(`task_id="${child.id}"`)
+          expect(cause).toContain('model="test/test-model"')
+          expect(cause).not.toContain("other/claude")
+          expect(cause).not.toContain("start a new root")
+        }
       }),
     {
       config: () => ({
@@ -2364,5 +2374,968 @@ describe("tool.task", () => {
         },
       }),
     },
+  )
+
+  const opusCatalog = () => ({
+    model_routing: { scope: "curated", roles: { general: ["oss/llama"] } },
+    provider: {
+      oss: {
+        npm: "@ai-sdk/openai-compatible",
+        options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+        models: { llama: { name: "Llama", limit: { context: 100000, output: 1000 } } },
+      },
+      "github-copilot": {
+        npm: "@ai-sdk/openai-compatible",
+        options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+        models: { "claude-opus-5.5": { name: "Opus", limit: { context: 100000, output: 1000 } } },
+      },
+    },
+  })
+
+  it.instance(
+    "explicit task model wins over configured role candidates and sticks for downstream turns",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const routing = yield* ModelRouting.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          {
+            description: "design review",
+            prompt: "design the widget",
+            subagent_type: "general",
+            model: "github-copilot/claude-opus-5.5",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toMatchObject({ providerID: "github-copilot", modelID: "claude-opus-5.5" })
+        expect(seen?.variant).toBeUndefined()
+        expect(result.metadata.model).toMatchObject({ providerID: "github-copilot", modelID: "claude-opus-5.5" })
+        const childID = SessionID.make(result.metadata.sessionId)
+        // Downstream turns resolve the recorded override even when asked
+        // with the role default, instead of rerouting back to oss/llama.
+        expect(
+          yield* routing.resolve({
+            sessionID: childID,
+            role: "general",
+            model: { providerID: ProviderV2.ID.make("oss"), modelID: ModelV2.ID.make("llama") },
+          }),
+        ).toMatchObject({ providerID: "github-copilot", modelID: "claude-opus-5.5" })
+        yield* routing.check({
+          sessionID: childID,
+          role: "general",
+          model: {
+            providerID: ProviderV2.ID.make("github-copilot"),
+            modelID: ModelV2.ID.make("claude-opus-5.5"),
+          },
+        })
+        const status = yield* routing.command({
+          sessionID: childID,
+          action: "status",
+          model: {
+            providerID: ProviderV2.ID.make("github-copilot"),
+            modelID: ModelV2.ID.make("claude-opus-5.5"),
+          },
+        })
+        expect(status).toContain("Explicit Task overrides (sticky per child session)")
+        expect(status).toContain(`${childID} general -> github-copilot/claude-opus-5.5`)
+      }),
+    { config: opusCatalog },
+  )
+
+  it.instance(
+    "task without an explicit model keeps the configured default route",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          { description: "ordinary task", prompt: "inspect", subagent_type: "general" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toMatchObject({ providerID: "oss", modelID: "llama" })
+        expect(result.metadata.model).toMatchObject({ providerID: "oss", modelID: "llama" })
+      }),
+    { config: opusCatalog },
+  )
+
+  it.instance(
+    "explicit task model fails when the provider is disabled",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "design review",
+              prompt: "design the widget",
+              subagent_type: "general",
+              model: "github-copilot/claude-opus-5.5",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("Explicit Task model override")
+          expect(Cause.pretty(exit.cause)).toContain("disabled via disabled_providers")
+        }
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    {
+      config: () => ({
+        ...opusCatalog(),
+        disabled_providers: ["github-copilot"],
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit task model fails when the provider is not enabled",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "design review",
+              prompt: "design the widget",
+              subagent_type: "general",
+              model: "github-copilot/claude-opus-5.5",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("Explicit Task model override")
+          expect(Cause.pretty(exit.cause)).toContain("not listed in enabled_providers")
+        }
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    {
+      config: () => ({
+        ...opusCatalog(),
+        enabled_providers: ["oss"],
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit task model fails outside the same-scope anchor without substituting",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "design review",
+              prompt: "design the widget",
+              subagent_type: "general",
+              model: "github-copilot/claude-opus-5.5",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("Explicit Task model override")
+          expect(Cause.pretty(exit.cause)).toContain("outside the same-provider anchor")
+          expect(Cause.pretty(exit.cause)).toContain("No fallback was used")
+        }
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    {
+      config: () => ({
+        ...opusCatalog(),
+        model_routing: { scope: "same", roles: { general: ["oss/llama"] } },
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit task model fails for catalog-unavailable models",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "design review",
+              prompt: "design the widget",
+              subagent_type: "general",
+              model: "oss/ghost",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("not available in the provider catalog")
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    { config: opusCatalog },
+  )
+
+  it.instance(
+    "explicit task_id and model switches an idle subagent provider in curated scope",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const routing = yield* ModelRouting.Service
+        const { chat, assistant } = yield* seed()
+        const child = yield* sessions.create({
+          parentID: chat.id,
+          title: "Existing child",
+          agent: "general",
+          model: { providerID: ProviderV2.ID.make("other"), id: ModelV2.ID.make("claude") },
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          {
+            description: "resume with switch",
+            prompt: "continue on the new provider",
+            task_id: child.id,
+            model: "test/test-model",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(result.metadata.requestedModel).toMatchObject({ providerID: "test", modelID: "test-model" })
+        expect(result.output).toContain("Resume model selected: test/test-model")
+        expect(result.metadata.sessionId).toBe(child.id)
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+        // Pin and sticky override updated together: later turns stay switched.
+        expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: ref })).toMatchObject({
+          providerID: "test",
+          modelID: "test-model",
+        })
+        yield* routing.check({ sessionID: child.id, role: "general", model: ref })
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { general: ["test/test-model", "other/claude"] } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  const reviewerCatalog = (candidates: string[]) => ({
+    model_routing: { scope: "curated" as const, roles: { reviewer: candidates } },
+    agent: { reviewer: { mode: "subagent" as const, description: "Reviewer" } },
+    provider: {
+      test: {
+        npm: "@ai-sdk/openai-compatible",
+        options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+        models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+      },
+      other: {
+        npm: "@ai-sdk/openai-compatible",
+        options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+        models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+      },
+    },
+  })
+
+  const taskContext = (chat: { id: SessionID }, assistant: { id: MessageID }, promptOps: TaskPromptOps) => ({
+    sessionID: chat.id,
+    messageID: assistant.id,
+    agent: "build",
+    abort: new AbortController().signal,
+    extra: { promptOps },
+    messages: [],
+    metadata: () => Effect.void,
+    ask: () => Effect.void,
+  })
+
+  it.instance(
+    "resume without model blocks on a stored writer-matching override even when role candidates are unavailable",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const first = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer", model: "test/test-model" },
+          taskContext(chat, assistant, stubOps({})),
+        )
+        const childID = SessionID.make(first.metadata.sessionId)
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            { description: "review again", prompt: "review this again", task_id: childID },
+            taskContext(chat, assistant, stubOps({ onPrompt: () => calls++ })),
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("Reviewer separation")
+          expect(Cause.pretty(exit.cause)).toContain("test/test-model")
+        }
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    { config: () => reviewerCatalog(["missing/model"]) },
+  )
+
+  it.instance(
+    "resume without model proceeds on a stored independent override instead of falsely blocking",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const first = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer", model: "other/gpt" },
+          taskContext(chat, assistant, stubOps({})),
+        )
+        const childID = SessionID.make(first.metadata.sessionId)
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
+        let calls = 0
+
+        const result = yield* def.execute(
+          { description: "review again", prompt: "review this again", task_id: childID },
+          taskContext(chat, assistant, stubOps({ onPrompt: () => calls++ })),
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(result.metadata.sessionId).toBe(childID)
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    { config: () => reviewerCatalog(["test/test-model"]) },
+  )
+
+  it.instance(
+    "reviewer separation honors a per-call override to an independent reviewer",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer", model: "other/gpt" },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(result.metadata.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(seen?.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "reviewer separation still blocks an override that matches the writer model",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            { description: "review change", prompt: "review this", subagent_type: "reviewer", model: "test/test-model" },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("Reviewer separation")
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { reviewer: ["test/test-model"] } },
+        agent: { reviewer: { mode: "subagent", description: "Reviewer" } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit switch rejects while the child is still executing",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const run = yield* SessionRunState.Service
+        const { chat, assistant } = yield* seed()
+        const child = yield* sessions.create({ parentID: chat.id, title: "Running child", agent: "general" })
+        const idle: SessionV1.WithParts = { info: assistant, parts: [] }
+        const fiber = yield* run.ensureRunning(child.id, Effect.succeed(idle), Effect.never).pipe(Effect.forkChild)
+        yield* pollWithTimeout(
+          run.assertNotBusy(child.id).pipe(
+            Effect.exit,
+            Effect.map((exit) => (Exit.isFailure(exit) ? (true as const) : undefined)),
+          ),
+          "child never became busy",
+        )
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "resume with switch",
+              prompt: "continue on the new provider",
+              task_id: child.id,
+              model: "test/test-model",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("still executing")
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+        yield* Fiber.interrupt(fiber)
+      }),
+    { config: opusCatalog },
+  )
+
+  it.instance(
+    "explicit override validates provider policy even with routing off",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "design review",
+              prompt: "design the widget",
+              subagent_type: "general",
+              model: "other/gpt",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) {
+          expect(Cause.pretty(exit.cause)).toContain("Explicit Task model override")
+          expect(Cause.pretty(exit.cause)).toContain("disabled via disabled_providers")
+        }
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+      }),
+    {
+      config: () => ({
+        disabled_providers: ["other"],
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit override succeeds with routing off when permitted",
+    () =>
+      Effect.gen(function* () {
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          {
+            description: "design review",
+            prompt: "design the widget",
+            subagent_type: "general",
+            model: "other/gpt",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(result.metadata.model).toMatchObject({ providerID: "other", modelID: "gpt" })
+        expect(result.metadata.requestedModel).toMatchObject({ providerID: "other", modelID: "gpt" })
+      }),
+    {
+      config: () => ({
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "rejected override leaves no routing residue behind",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const storage = yield* Storage.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+
+        const exit = yield* def
+          .execute(
+            {
+              description: "design review",
+              prompt: "design the widget",
+              subagent_type: "general",
+              model: "github-copilot/claude-opus-5.5",
+            },
+            {
+              sessionID: chat.id,
+              messageID: assistant.id,
+              agent: "build",
+              abort: new AbortController().signal,
+              extra: { promptOps: stubOps({}) },
+              messages: [],
+              metadata: () => Effect.void,
+              ask: () => Effect.void,
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(Exit.isFailure(exit)).toBe(true)
+        expect(yield* sessions.children(chat.id)).toHaveLength(0)
+        expect(yield* storage.read(["model_routing", chat.id])).toMatchObject({ pins: {}, overrides: {} })
+      }),
+    {
+      config: () => ({
+        ...opusCatalog(),
+        disabled_providers: ["github-copilot"],
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit task_id and model switches the model within the same provider",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const routing = yield* ModelRouting.Service
+        const { chat, assistant } = yield* seed()
+        const child = yield* sessions.create({
+          parentID: chat.id,
+          title: "Existing child",
+          agent: "general",
+          model: { providerID: ref.providerID, id: ref.modelID },
+        })
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        let seen: SessionPrompt.PromptInput | undefined
+
+        const result = yield* def.execute(
+          {
+            description: "resume with switch",
+            prompt: "continue on the new model",
+            task_id: child.id,
+            model: "test/test-second",
+          },
+          {
+            sessionID: chat.id,
+            messageID: assistant.id,
+            agent: "build",
+            abort: new AbortController().signal,
+            extra: { promptOps: stubOps({ onPrompt: (input) => (seen = input) }) },
+            messages: [],
+            metadata: () => Effect.void,
+            ask: () => Effect.void,
+          },
+        )
+
+        expect(seen?.model).toMatchObject({ providerID: "test", modelID: "test-second" })
+        expect(result.metadata.model).toMatchObject({ providerID: "test", modelID: "test-second" })
+        expect(result.output).toContain("Resume model selected: test/test-second")
+        expect(result.metadata.sessionId).toBe(child.id)
+        expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: ref })).toMatchObject({
+          providerID: "test",
+          modelID: "test-second",
+        })
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "same", roles: { general: ["test/test-model"] } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: {
+              "test-model": { name: "Test", limit: { context: 100000, output: 1000 } },
+              "test-second": { name: "Second", limit: { context: 100000, output: 1000 } },
+            },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "registry exposes models discovery and task points callers at it",
+    () =>
+      Effect.gen(function* () {
+        const registry = yield* ToolRegistry.Service
+        const agents = yield* Agent.Service
+        expect(yield* registry.ids()).toContain("models")
+        const build = yield* agents.get("build")
+        if (!build) throw new Error("missing build agent")
+        const tools = yield* registry.tools({ ...ref, agent: build })
+        const task = tools.find((item) => item.id === TaskTool.id)
+        expect(task?.description).toContain("models tool")
+        expect(task?.description).toContain("do not guess")
+      }),
+    { config: opusCatalog },
+  )
+
+  it.instance(
+    "prior child transcript survives a cross-provider explicit resume",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const context = {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({}) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        }
+
+        const first = yield* def.execute(
+          { description: "first pass", prompt: "inspect", subagent_type: "general", model: "test/test-model" },
+          context,
+        )
+        const childID = SessionID.make(first.metadata.sessionId)
+        const childUser = yield* sessions.updateMessage({
+          id: MessageID.ascending(),
+          role: "user",
+          sessionID: childID,
+          agent: "general",
+          model: ref,
+          time: { created: Date.now() },
+        })
+        yield* sessions.updatePart({
+          id: PartID.ascending(),
+          messageID: childUser.id,
+          sessionID: childID,
+          type: "text",
+          text: "prior child work",
+        })
+        let calls = 0
+
+        const result = yield* def.execute(
+          {
+            description: "second pass",
+            prompt: "continue",
+            task_id: childID,
+            model: "other/gpt",
+          },
+          {
+            ...context,
+            extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+          },
+        )
+
+        expect(calls).toBe(1)
+        expect(result.metadata.sessionId).toBe(childID)
+        expect(result.output).toContain("Resume model selected: other/gpt")
+        const transcript = yield* sessions.messages({ sessionID: childID })
+        expect(
+          transcript.some((message) =>
+            message.parts.some((part) => part.type === "text" && part.text.includes("prior child work")),
+          ),
+        ).toBe(true)
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    {
+      config: () => ({
+        model_routing: { scope: "curated", roles: { general: ["test/test-model"] } },
+        provider: {
+          test: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { "test-model": { name: "Test", limit: { context: 100000, output: 1000 } } },
+          },
+          other: {
+            npm: "@ai-sdk/openai-compatible",
+            options: { apiKey: "test", baseURL: "http://127.0.0.1:1" },
+            models: { gpt: { name: "GPT", limit: { context: 100000, output: 1000 } } },
+          },
+        },
+      }),
+    },
+  )
+
+  it.instance(
+    "explicit cross-provider reviewer switch still blocks a writer match",
+    () =>
+      Effect.gen(function* () {
+        const sessions = yield* Session.Service
+        const { chat, assistant } = yield* seed()
+        const tool = yield* TaskTool
+        const def = yield* tool.init()
+        const context = {
+          sessionID: chat.id,
+          messageID: assistant.id,
+          agent: "build",
+          abort: new AbortController().signal,
+          extra: { promptOps: stubOps({}) },
+          messages: [],
+          metadata: () => Effect.void,
+          ask: () => Effect.void,
+        }
+
+        const first = yield* def.execute(
+          { description: "review change", prompt: "review this", subagent_type: "reviewer", model: "other/gpt" },
+          context,
+        )
+        const childID = SessionID.make(first.metadata.sessionId)
+        yield* sessions.updatePart(
+          completedToolPart({ sessionID: chat.id, messageID: assistant.id, tool: "edit", callID: "call-edit-1" }),
+        )
+        let calls = 0
+
+        const exit = yield* def
+          .execute(
+            { description: "review again", prompt: "review this again", task_id: childID, model: "test/test-model" },
+            {
+              ...context,
+              extra: { promptOps: stubOps({ onPrompt: () => calls++ }) },
+            },
+          )
+          .pipe(Effect.exit)
+
+        expect(calls).toBe(0)
+        expect(Exit.isFailure(exit)).toBe(true)
+        if (Exit.isFailure(exit)) expect(Cause.pretty(exit.cause)).toContain("Reviewer separation")
+        expect(yield* sessions.children(chat.id)).toHaveLength(1)
+      }),
+    { config: () => reviewerCatalog(["test/test-model"]) },
   )
 })

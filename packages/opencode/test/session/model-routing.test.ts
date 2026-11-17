@@ -321,6 +321,83 @@ it.instance(
   { config },
 )
 
+const pinConflictConfig: Config.Info = {
+  ...config,
+  model_routing: {
+    scope: "same",
+    roles: {
+      general: ["route-b/ghost", "route-a/gpt"],
+    },
+  },
+}
+
+it.instance(
+  "pin conflict names exact permitted alternatives ignoring only the pin",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({
+        parentID: root.id,
+        title: "Child",
+        model: { providerID: b.providerID, id: b.modelID },
+      })
+      const result = yield* routing.resolve({ sessionID: child.id, role: "general", model: a }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        const cause = Cause.pretty(result.cause)
+        expect(cause).toContain("child pinned to route-b")
+        expect(cause).toContain("route-a/gpt")
+        expect(cause).toContain(`task_id="${child.id}"`)
+        expect(cause).toContain('model="route-a/gpt"')
+        expect(cause).not.toContain("route-b/ghost")
+        expect(cause).not.toContain("start a new root")
+      }
+      // Default selection policy is unchanged: the stored role candidates
+      // still fail closed for the pinned child on a plain retry.
+      const retry = yield* routing.resolve({ sessionID: child.id, role: "general", model: a }).pipe(Effect.exit)
+      expect(Exit.isFailure(retry)).toBe(true)
+    }),
+  { config: pinConflictConfig },
+)
+
+const pinConflictRestrictedConfig: Config.Info = {
+  ...config,
+  disabled_providers: ["route-a"],
+  model_routing: {
+    scope: "same",
+    roles: {
+      general: ["route-b/ghost", "route-a/gpt"],
+    },
+  },
+}
+
+it.instance(
+  "pin conflict without alternatives says restrictions need change",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({
+        parentID: root.id,
+        title: "Child",
+        model: { providerID: b.providerID, id: b.modelID },
+      })
+      const result = yield* routing.resolve({ sessionID: child.id, role: "general", model: a }).pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        const cause = Cause.pretty(result.cause)
+        expect(cause).toContain("child pinned to route-b")
+        expect(cause).toContain("No alternative satisfies")
+        expect(cause).not.toContain("task_id")
+        expect(cause).not.toContain("route-a/gpt")
+      }
+    }),
+  { config: pinConflictRestrictedConfig },
+)
+
 it.instance(
   "historical children adopt their stored provider rather than the new first candidate",
   () =>
@@ -669,6 +746,90 @@ it.instance(
         scope: "same",
         rootSessionID: root.id,
         anchor: a,
+      })
+    }),
+  { config },
+)
+
+it.instance(
+  "explicit override wins over role candidates and persists for later turns",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, title: "Child" })
+      const override = Provider.parseModel("route-a/gpt")
+      const resolved = yield* routing.resolve({ sessionID: child.id, role: "general", model: a, override })
+      expect(resolved).toMatchObject({ providerID: "route-a", modelID: "gpt" })
+      // Later turns without the override still honor the recorded model
+      // instead of rerouting back to the role default (route-a/claude).
+      expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: a })).toMatchObject({
+        providerID: "route-a",
+        modelID: "gpt",
+      })
+      yield* routing.check({ sessionID: child.id, role: "general", model: override })
+    }),
+  { config },
+)
+
+it.instance(
+  "explicit override fails closed outside the same-scope anchor without fallback",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, title: "Child" })
+      const result = yield* routing
+        .resolve({ sessionID: child.id, role: "general", model: a, override: b })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) {
+        expect(Cause.pretty(result.cause)).toContain("Explicit Task model override route-b/claude")
+        expect(Cause.pretty(result.cause)).toContain("outside the same-provider anchor")
+        expect(Cause.pretty(result.cause)).toContain("No fallback was used")
+      }
+    }),
+  { config },
+)
+
+it.instance(
+  "explicit override fails closed for catalog-unavailable models",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, title: "Child" })
+      const result = yield* routing
+        .resolve({ sessionID: child.id, role: "general", model: a, override: Provider.parseModel("route-a/ghost") })
+        .pipe(Effect.exit)
+      expect(Exit.isFailure(result)).toBe(true)
+      if (Exit.isFailure(result)) expect(Cause.pretty(result.cause)).toContain("not available in the provider catalog")
+    }),
+  { config },
+)
+
+it.instance(
+  "refresh preserves sticky overrides while later turns stay fail-closed",
+  () =>
+    Effect.gen(function* () {
+      const routing = yield* ModelRouting.Service
+      const sessions = yield* Session.Service
+      const root = yield* sessions.create({ title: "Root", model: { providerID: a.providerID, id: a.modelID } })
+      const child = yield* sessions.create({ parentID: root.id, title: "Child" })
+      const override = Provider.parseModel("route-a/gpt")
+      expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: a, override })).toMatchObject({
+        providerID: "route-a",
+        modelID: "gpt",
+      })
+      yield* routing.command({ sessionID: root.id, action: "refresh", model: a })
+      const status = yield* routing.command({ sessionID: root.id, action: "status", model: a })
+      expect(status).toContain(`${child.id} general -> route-a/gpt`)
+      expect(yield* routing.resolve({ sessionID: child.id, role: "general", model: a })).toMatchObject({
+        providerID: "route-a",
+        modelID: "gpt",
       })
     }),
   { config },

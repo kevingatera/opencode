@@ -1,0 +1,7 @@
+List available provider/model IDs for use with tools that take an exact model, like Task's model override.
+
+On-demand discovery only: entries are bounded by limit and an optional query filter, so the full catalog never lands in context unasked.
+
+- IDs are exact `provider/model` strings; pass one unchanged, do not guess or edit IDs.
+- Recents come first, then the rest alphabetically. Recents are best-effort history from local state and may be missing.
+- Catalog availability does not prove access or entitlement: disabled providers, enabled-provider lists, routing scope, and the Task tool's own policy checks still apply and fail closed.

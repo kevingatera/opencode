@@ -21,6 +21,7 @@ import { EffectBridge } from "@/effect/bridge"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Database } from "@opencode-ai/core/database/database"
 import { ModelRouting } from "@/session/model-routing"
+import { SessionRunState } from "@/session/run-state"
 import { Provider } from "@/provider/provider"
 
 export interface TaskPromptOps {
@@ -86,7 +87,7 @@ const BaseParameterFields = {
   }),
   model: Schema.optional(Schema.String).annotate({
     description:
-      'Optional per-call reviewer model override as "provider/model". Still subject to model_routing permitted checks; use it to select an independent reviewer without changing role candidates.',
+      'Optional per-call model override as "provider/model" for this Task execution. Use the models tool to discover exact IDs; do not guess. Wins over configured role candidates but still enforces model_routing policy (same-scope anchor provider, enabled/disabled providers, catalog availability, resumed child provider pin) and fails without substituting; reviewer-separation roles preview and check the actual override. Resuming with task_id+model switches an idle subagent to that model; omitting model keeps the current one. When the user requests a different model for an existing task, pass task_id and the exact model together on the first resume.',
   }),
 }
 
@@ -174,6 +175,7 @@ type TaskMetadata = {
   parentSessionId: SessionID
   sessionId: SessionID
   model: { modelID: string; providerID: string }
+  requestedModel?: { modelID: string; providerID: string }
   directory?: string
   subagentType?: string
   resumed?: boolean
@@ -229,6 +231,7 @@ export const TaskTool = Tool.define(
     const flags = yield* RuntimeFlags.Service
     const database = yield* Database.Service
     const routing = yield* ModelRouting.Service
+    const runState = yield* SessionRunState.Service
 
     const run = Effect.fn("TaskTool.execute")(function* (
       params: Schema.Schema.Type<typeof Parameters>,
@@ -318,14 +321,31 @@ export const TaskTool = Tool.define(
       }
       const overrideModel = parseTaskModelOverride(overrideInput)
 
+      // Never re-pin a child that is currently executing: the runner owns it.
+      // Plain resumes of running children keep working; only explicit model
+      // switches are rejected here.
+      if (session && overrideModel) {
+        const idle = yield* runState.assertNotBusy(session.id).pipe(Effect.exit)
+        if (Exit.isFailure(idle))
+          return yield* Effect.fail(
+            new Error(
+              `Cannot switch model for running task ${taskID}: the subagent is still executing. Wait for it to finish, then resume with task_id and model.`,
+            ),
+          )
+      }
+
       // Reviewer-separation guard at Task-tool admission (legacy SessionPrompt only).
       // V2 sessions share this id space, but the V2 runner resolves models through
       // the catalog without consulting routing state, so V2 turns are out of scope.
-      // Preview with auxiliary:true so no child provider pin is written; a match
-      // blocks only with authorship evidence (completed file writes by the writer
-      // model here or in descendant transcripts) and fails before session creation.
-      // Warn-proceed paths (unconfigured, no evidence) and forced matches prepend
-      // a visible note to the Task result text below (plus the log).
+      // The preview resolves exactly what execution selection would decide,
+      // read-only: on a resumed child that means its provider pin and recorded
+      // override apply. A fresh child has neither, which is identical to the
+      // auxiliary preview on the parent, so no child session is created here.
+      // A match blocks only with authorship evidence (completed file writes by
+      // the writer model here or in descendant transcripts) and fails before
+      // session creation. Warn-proceed paths (unconfigured, no evidence) and
+      // forced matches prepend a visible note to the Task result text below
+      // (plus the log).
       let separationNote: string | undefined
       if (!isExemptSeparationRole(next.name) && isSeparationRole(next.name, separationRolePatterns(cfg))) {
         const writerMsg = yield* MessageV2.get({ sessionID: ctx.sessionID, messageID: ctx.messageID }).pipe(
@@ -341,7 +361,11 @@ export const TaskTool = Tool.define(
           yield* Effect.logWarning(separationNote)
         } else {
           const preview = yield* routing
-            .resolve({ sessionID: ctx.sessionID, role: next.name, model: base, auxiliary: true })
+            .resolve(
+              session
+                ? { sessionID: session.id, role: next.name, model: base, preview: true, override: overrideModel }
+                : { sessionID: ctx.sessionID, role: next.name, model: base, auxiliary: true, override: overrideModel },
+            )
             .pipe(Effect.exit)
           if (Exit.isSuccess(preview)) {
             const resolved = preview.value
@@ -439,23 +463,43 @@ export const TaskTool = Tool.define(
       if (msg.info.role !== "assistant") return yield* Effect.fail(new Error("Not an assistant message"))
       const variant = msg.info.variant
 
-      const model = yield* routing.resolve({
-        sessionID: nextSession.id,
-        role: next.name,
-        model: {
-          modelID: overrideModel?.modelID ?? next.model?.modelID ?? msg.info.modelID,
-          providerID: overrideModel?.providerID ?? next.model?.providerID ?? msg.info.providerID,
-        },
-      })
+      const model = yield* routing
+        .resolve({
+          sessionID: nextSession.id,
+          role: next.name,
+          model: {
+            modelID: overrideModel?.modelID ?? next.model?.modelID ?? msg.info.modelID,
+            providerID: overrideModel?.providerID ?? next.model?.providerID ?? msg.info.providerID,
+          },
+          override: overrideModel,
+        })
+        .pipe(
+          // A rejected admission must not orphan the session created above;
+          // resumes reuse the existing child and are left untouched. The
+          // routing failure is a defect (Effect.die), which onError would
+          // miss, so observe every exit and leave the original untouched;
+          // cleanup failures of their own never mask it.
+          Effect.onExit((exit) => {
+            if (Exit.isSuccess(exit) || session) return Effect.void
+            return sessions.remove(nextSession.id).pipe(Effect.catchCause(() => Effect.void))
+          }),
+        )
       const taskVariant =
         overrideModel || next.model || model.providerID !== msg.info.providerID || model.modelID !== msg.info.modelID
           ? undefined
           : variant
       const resumed = !!session
+      // session.model is usually unset for Task children, so a comparison
+      // against it cannot tell whether the model actually changed. State the
+      // neutral fact instead: an explicit model was requested for this resume.
+      const resumeModel = resumed && overrideModel ? overrideModel : undefined
       const metadata: TaskMetadata = {
         parentSessionId: ctx.sessionID,
         sessionId: nextSession.id,
         model,
+        ...(overrideModel
+          ? { requestedModel: { modelID: overrideModel.modelID, providerID: overrideModel.providerID } }
+          : {}),
         directory,
         subagentType: next.name,
         ...(resumed ? { resumed: true } : {}),
@@ -631,6 +675,9 @@ export const TaskTool = Tool.define(
               metadata,
               output: taskOutput({
                 state: "completed",
+                summary: resumeModel
+                  ? `Resume model selected: ${resumeModel.providerID}/${resumeModel.modelID}`
+                  : undefined,
                 text: withSeparationNote(result?.output ?? "", separationNote),
               }),
             }
@@ -678,11 +725,11 @@ function matchesSeparationGlob(pattern: string, value: string) {
   return new RegExp(`^${escaped}$`).test(value)
 }
 
-function isSeparationRole(role: string, patterns: readonly string[]) {
+export function isSeparationRole(role: string, patterns: readonly string[]) {
   return patterns.some((pattern) => matchesSeparationGlob(pattern, role))
 }
 
-function separationRolePatterns(cfg: unknown): string[] {
+export function separationRolePatterns(cfg: unknown): string[] {
   if (!cfg || typeof cfg !== "object" || !("model_routing" in cfg)) return ["review*"]
   const routing = (cfg as { model_routing?: unknown }).model_routing
   if (!routing || typeof routing !== "object" || !("separation_roles" in routing)) return ["review*"]

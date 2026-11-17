@@ -44,7 +44,7 @@ import { decodeDataUrl } from "@/util/data-url"
 import { Process } from "@/util/process"
 import { Cause, Effect, Exit, Latch, Layer, Option, Scope, Context, Schema, Types } from "effect"
 import { InstanceState } from "@/effect/instance-state"
-import { TaskTool, renderTaskOutput, type TaskPromptOps } from "@/tool/task"
+import { TaskTool, isSeparationRole, renderTaskOutput, separationRolePatterns, type TaskPromptOps } from "@/tool/task"
 import { SessionRunState } from "./run-state"
 import { ModelRouting } from "./model-routing"
 import { ReasoningBrief } from "./reasoning-brief"
@@ -117,7 +117,42 @@ function formatMcpResourceBytes(value: number) {
 function isOrphanedInterruptedTool(part: SessionV1.ToolPart) {
   // cleanup() marks abandoned tool_use blocks this way after retries/aborts.
   // They are not pending work and must not trigger an assistant-prefill request.
-  return part.state.status === "error" && part.state.metadata?.interrupted === true
+  // Recovered task errors are terminal results, not abandoned calls, so they
+  // stay visible as tool results even if an interrupted flag is ever present.
+  if (part.state.status !== "error") return false
+  if (part.tool === "task" && part.state.metadata?.recovered === true) return false
+  return part.state.metadata?.interrupted === true
+}
+
+// Bounded automatic candidate failover (legacy SessionPrompt runner only)
+// engages only for provider/API failures surfaced as an assistant message
+// error: content filters, structured-output mismatches, context overflows,
+// user aborts, and output-length limits keep the existing error path so a
+// retry on another candidate cannot mask them. Auth and unknown provider
+// errors stay eligible: they carry no partial work by construction (the parts
+// gate below enforces that) and another permitted candidate may succeed.
+/** @internal Exported for testing */
+export function isFailoverEligibleError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false
+  if (SessionV1.ContentFilterError.isInstance(error)) return false
+  if (SessionV1.StructuredOutputError.isInstance(error)) return false
+  if (SessionV1.ContextOverflowError.isInstance(error)) return false
+  if (SessionV1.AbortedError.isInstance(error)) return false
+  if (SessionV1.OutputLengthError.isInstance(error)) return false
+  return true
+}
+
+// Failover reuses the same user message and starts a fresh assistant message,
+// so it must not run when the failed attempt persisted partial work. Any tool
+// part (even pending) or any non-empty text part blocks it; empty text
+// placeholders and reasoning/step markers do not.
+/** @internal Exported for testing */
+export function hasFailoverBlockingParts(parts: SessionV1.Part[]): boolean {
+  return parts.some((part) => {
+    if (part.type === "tool") return true
+    if (part.type === "text") return part.text.trim().length > 0
+    return false
+  })
 }
 
 export interface Interface {
@@ -1149,6 +1184,14 @@ const layer = Layer.effect(
       throw new Error("Impossible")
     })
 
+    function childAssistantText(msg: SessionV1.WithParts) {
+      return msg.parts
+        .filter((part): part is SessionV1.TextPart => part.type === "text")
+        .map((part) => part.text)
+        .join("\n")
+        .trim()
+    }
+
     const childTaskResult = (msgs: SessionV1.WithParts[], startedAt: number) => {
       // Chronological last message, not ID order — post-wrap MessageIDs sort before older ones.
       const last = msgs
@@ -1156,21 +1199,42 @@ const layer = Layer.effect(
         .toSorted((a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id))
         .at(-1)
       if (!last || last.info.role !== "assistant") return
+      // A terminal error takes precedence over any partial text. Without this
+      // a content-filtered turn (finish + text + info.error) would recover as
+      // success and mask the error; childTaskAbort handles it instead.
+      if (last.info.error) return
       if (!last.info.finish || last.info.finish === "tool-calls") return
       const finishedAt = last.info.time.completed ?? last.info.time.created
       // A finished turn from before this parent Task started is the previous
       // run. Treating it as done aborts live resumes: recover marks the parent
       // tool complete, then processor cleanup overwrites it as aborted.
       if (finishedAt < startedAt) return
-      const text = last.parts
-        .filter((part): part is SessionV1.TextPart => part.type === "text")
-        .map((part) => part.text)
-        .join("\n")
-        .trim()
+      const text = childAssistantText(last)
       if (!text) return
       return text
     }
 
+    function childTaskAbort(msgs: SessionV1.WithParts[], startedAt: number) {
+      // Chronological last message only. An earlier error with a later user
+      // message means a resume is pending; a missing completion timestamp
+      // means the child is still live. Both must not reconcile.
+      const last = msgs
+        .filter((msg) => !MessageV2.isControl(msg))
+        .toSorted((a, b) => a.info.time.created - b.info.time.created || a.info.id.localeCompare(b.info.id))
+        .at(-1)
+      if (!last || last.info.role !== "assistant") return
+      if (!last.info.error) return
+      const completedAt = last.info.time.completed
+      if (typeof completedAt !== "number") return
+      if (completedAt < startedAt) return
+      const name = last.info.error.name || "Error"
+      const data: unknown = last.info.error.data
+      const detail =
+        typeof data === "object" && data !== null && "message" in data && typeof data.message === "string"
+          ? data.message
+          : name
+      return { name, message: detail, text: childAssistantText(last) }
+    }
     let wakeRecoveredSession: (sessionID: SessionID) => Effect.Effect<void> = () => Effect.void
     let recoverParentForChild: (parentID: SessionID, childSessionID: SessionID) => Effect.Effect<void> = () =>
       Effect.void
@@ -1180,7 +1244,7 @@ const layer = Layer.effect(
       options?: { wake?: boolean; childSessionID?: SessionID },
     ) {
       const msgs = yield* sessions.messages({ sessionID })
-      let recovered = false
+      let recoveredCompleted = false
 
       for (const message of msgs) {
         if (message.info.role !== "assistant") continue
@@ -1193,39 +1257,74 @@ const layer = Layer.effect(
 
           const childMsgs = yield* sessions.messages({ sessionID: childSessionID })
           const text = childTaskResult(childMsgs, part.state.time.start)
-          if (!text) continue
-
           const description = typeof part.state.input?.description === "string" ? part.state.input.description : "task"
+          if (text) {
+            const output = renderTaskOutput({
+              sessionID: childSessionID,
+              state: "completed",
+              summary: `Recovered task completed: ${description}`,
+              text,
+            })
+
+            const completed = {
+              status: "completed" as const,
+              input: part.state.input,
+              output,
+              title: part.state.title ?? description,
+              metadata: {
+                ...metadata,
+                recovered: true,
+              },
+              time: {
+                ...part.state.time,
+                end: Date.now(),
+              },
+            } satisfies SessionV1.ToolStateCompleted
+            yield* sessions.updatePart({
+              ...part,
+              state: completed,
+            })
+            recoveredCompleted = true
+            continue
+          }
+
+          const abort = childTaskAbort(childMsgs, part.state.time.start)
+          if (!abort) continue
+
+          const body = abort.text ? `${abort.text}\n\n[${abort.message}]` : abort.message
           const output = renderTaskOutput({
             sessionID: childSessionID,
-            state: "completed",
-            summary: `Recovered task completed: ${description}`,
-            text,
+            state: "error",
+            summary: `Recovered task interrupted: ${description} (${abort.name})`,
+            text: body,
           })
-
-          const completed = {
-            status: "completed" as const,
-            input: part.state.input,
-            output,
-            title: part.state.title ?? description,
-            metadata: {
-              ...metadata,
-              recovered: true,
-            },
-            time: {
-              ...part.state.time,
-              end: Date.now(),
-            },
-          } satisfies SessionV1.ToolStateCompleted
           yield* sessions.updatePart({
             ...part,
-            state: completed,
+            state: {
+              status: "error",
+              input: part.state.input,
+              error: output,
+              // recovered:true keeps model replay provider-safe (rendered as
+              // text, no dangling tool_use). No interrupted flag: that marker
+              // means cleanup-abandoned calls and the CLI renders it as
+              // user-cancelled, which a durable child error is not.
+              metadata: {
+                ...metadata,
+                recovered: true,
+              },
+              time: {
+                ...part.state.time,
+                end: Date.now(),
+              },
+            },
           })
-          recovered = true
         }
       }
 
-      if (!options?.wake || !recovered) return
+      // Error cleanup stays silent. Waking the parent for an aborted child
+      // would spend a provider turn just to observe the error; the next
+      // explicit parent resume picks it up through normal history.
+      if (!options?.wake || !recoveredCompleted) return
       yield* wakeRecoveredSession(sessionID)
     })
 
@@ -1239,6 +1338,78 @@ const layer = Layer.effect(
         let structured: unknown
         let step = 0
         const session = yield* sessions.get(sessionID).pipe(Effect.orDie)
+        // Bounded automatic candidate failover: provider/model pairs already
+        // attempted for the current user message. Each candidate runs at most
+        // once per turn; everything resets when the user message changes.
+        // failoverModel steers retries at the failover candidate without
+        // rewriting routing state beyond the pin update failover itself made.
+        let failoverUserID: string | undefined
+        let failoverModel: { providerID: ProviderV2.ID; modelID: ModelV2.ID } | undefined
+        let attempted: { providerID: ProviderV2.ID; modelID: ModelV2.ID }[] = []
+        // Next permitted candidate after a failed attempt, or undefined to
+        // keep the existing error path. Best-effort: lookup failures are
+        // handled by the caller so the original error always stands.
+        const failoverNext = Effect.fn("SessionPrompt.failoverNext")(function* (input: {
+          failed: SessionV1.Assistant
+          role: string
+          base: { providerID: ProviderV2.ID; modelID: ModelV2.ID }
+          auxiliary: boolean
+        }) {
+          if (!input.failed.error) return undefined
+          // Reviewer independence is an admission-time guarantee. Automatic
+          // failover has no writer identity to compare against, so a separation
+          // role ends here instead of risking a silent self-review.
+          const failoverCfg = yield* config.get()
+          if (isSeparationRole(input.role, separationRolePatterns(failoverCfg))) {
+            yield* Effect.logInfo("failover skipped: reviewer independence preserved", {
+              "session.id": sessionID,
+              role: input.role,
+            })
+            return undefined
+          }
+          if (!isFailoverEligibleError(input.failed.error)) {
+            yield* Effect.logInfo("failover skipped: ineligible error", {
+              "session.id": sessionID,
+              name: input.failed.error.name,
+            })
+            return undefined
+          }
+          const parts = yield* MessageV2.parts(input.failed.id).pipe(
+            Effect.provideService(Database.Service, database),
+          )
+          if (hasFailoverBlockingParts(parts)) {
+            yield* Effect.logInfo("failover skipped: partial work persisted", { "session.id": sessionID })
+            return undefined
+          }
+          const key = (model: { providerID: string; modelID: string }) => `${model.providerID}/${model.modelID}`
+          if (!attempted.some((model) => key(model) === key(input.failed)))
+            attempted.push({ providerID: input.failed.providerID, modelID: input.failed.modelID })
+          const next = yield* routing.failover({
+            sessionID,
+            role: input.role,
+            model: input.base,
+            attempted,
+            auxiliary: input.auxiliary,
+          })
+          if (!next) {
+            yield* Effect.logInfo("failover exhausted: no remaining candidates", { "session.id": sessionID })
+            return undefined
+          }
+          yield* Effect.logWarning("model routing failover", {
+            "session.id": sessionID,
+            role: input.role,
+            from: key(input.failed),
+            to: key(next),
+            pinUpdated: next.pinUpdated,
+          })
+          failoverModel = { providerID: next.providerID, modelID: next.modelID }
+          return failoverModel
+        })
+        // Parent resume entry point: recover() has no production callers, so
+        // reconcile this session's own stale tasks silently before the turn.
+        // Only durable terminal child evidence reconciles; live children and
+        // pending resumes are left untouched, and error cleanup never wakes.
+        yield* recoverStaleTasks(sessionID).pipe(Effect.orDie)
         if (session.parentID) {
           yield* recoverParentForChild(session.parentID, sessionID)
         }
@@ -1288,6 +1459,11 @@ const layer = Layer.effect(
           }
 
           step++
+          if (lastUser.id !== failoverUserID) {
+            failoverUserID = lastUser.id
+            failoverModel = undefined
+            attempted = []
+          }
           if (step === 1)
             yield* title({
               session,
@@ -1299,12 +1475,19 @@ const layer = Layer.effect(
           const nextTask = tasks.at(-1)
           const isCompactionTurn = nextTask?.type === "compaction"
           const compactionAgent = isCompactionTurn ? yield* agents.get("compaction") : undefined
-          const routed = yield* routing.resolve({
-            sessionID,
-            role: compactionAgent?.name ?? lastUser.agent,
-            model: compactionAgent?.model ?? lastUser.model,
-            auxiliary: isCompactionTurn,
-          })
+          const role = compactionAgent?.name ?? lastUser.agent
+          const baseModel = compactionAgent?.model ?? lastUser.model
+          // A failover retry runs the selected candidate directly instead of
+          // re-resolving the role default, so a recorded explicit override
+          // stays authoritative for later turns.
+          const routed =
+            failoverModel ??
+            (yield* routing.resolve({
+              sessionID,
+              role,
+              model: baseModel,
+              auxiliary: isCompactionTurn,
+            }))
           const model = yield* getModel(routed.providerID, routed.modelID, sessionID)
           const task = tasks.pop()
 
@@ -1450,6 +1633,9 @@ const layer = Layer.effect(
               tools,
               model,
               toolChoice: format.type === "json_schema" ? "required" : undefined,
+              // Lets the LLM-boundary routing check validate the failover
+              // candidate instead of the role default on retry iterations.
+              routingOverride: failoverModel,
             })
 
             if (structured !== undefined) {
@@ -1498,7 +1684,27 @@ const layer = Layer.effect(
             Effect.ensuring(instruction.clear(handle.message.id)),
             Effect.onInterrupt(() => finalizeInterruptedAssistant),
           )
-          if (outcome === "break") break
+          if (outcome === "break") {
+            // A failed assistant turn with no partial work retries once per
+            // remaining permitted candidate instead of ending the turn. The
+            // errored attempt stays visible in the transcript; the retry
+            // starts a fresh assistant message on the same user message.
+            // Failover lookup is best-effort: any lookup failure keeps the
+            // existing error path, never interrupts.
+            const retry = yield* failoverNext({
+              failed: handle.message,
+              role,
+              base: baseModel,
+              auxiliary: isCompactionTurn,
+            }).pipe(
+              Effect.catchCauseIf(
+                (cause) => !Cause.hasInterruptsOnly(cause),
+                () => Effect.succeed(undefined),
+              ),
+            )
+            if (retry) continue
+            break
+          }
           continue
         }
 
