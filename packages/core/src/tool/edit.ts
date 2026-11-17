@@ -11,6 +11,7 @@ import { FileDiff } from "@opencode-ai/schema/file-diff"
 import { createTwoFilesPatch, diffLines } from "diff"
 import { Effect, Layer, Schema } from "effect"
 import { makeLocationNode } from "../effect/app-node"
+import { EditHint } from "./edit-hint"
 import { FileMutation } from "../file-mutation"
 import { FSUtil } from "../fs-util"
 import { LocationMutation } from "../location-mutation"
@@ -70,8 +71,9 @@ const previewLines = (value: string, prefix: "+" | "-") => {
   return shown
 }
 
-export const toModelOutput = (output: Output, oldString: string, newString: string) =>
-  [
+export const toModelOutput = (output: Output, oldString: string, newString: string) => {
+  if (output.files.length === 0) return "No changes: oldString and newString are identical."
+  return [
     `Edited file successfully: ${output.files[0]?.file}`,
     `Replacements: ${output.replacements}`,
     "```diff",
@@ -79,6 +81,7 @@ export const toModelOutput = (output: Output, oldString: string, newString: stri
     ...previewLines(newString, "+"),
     "```",
   ].join("\n")
+}
 
 /** Deferred V2 edit behavior and UX integrations remain visible at the model-facing seam. */
 // TODO: Port V1 fuzzy correction strategies only after exact-edit behavior is established: line-trimmed matching, block-anchor fallback, indentation correction, and similarity-threshold review.
@@ -124,11 +127,6 @@ const layer = Layer.effectDiscard(
                   messageID: context.assistantMessageID,
                   callID: context.toolCallID,
                 }
-                if (input.oldString === input.newString) {
-                  return yield* new ToolFailure({
-                    message: "No changes to apply: oldString and newString are identical.",
-                  })
-                }
                 if (input.oldString === "") {
                   return yield* new ToolFailure({
                     message: "oldString must not be empty. Use write to create or overwrite a file.",
@@ -136,6 +134,16 @@ const layer = Layer.effectDiscard(
                 }
 
                 const target = yield* unableToEdit(mutation.resolve({ path: input.path, kind: "file" }))
+                if (input.oldString === input.newString) {
+                  // Identical strings never mutate the filesystem. A no-op succeeds only for an existing file.
+                  const exists = yield* fs.existsSafe(target.canonical)
+                  if (!exists) {
+                    return yield* new ToolFailure({
+                      message: "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
+                    })
+                  }
+                  return { files: [], replacements: 0 } satisfies Output
+                }
                 const external = target.externalDirectory
                 if (external) {
                   yield* unableToEdit(
@@ -164,10 +172,10 @@ const layer = Layer.effectDiscard(
                 const newString = convertToLineEnding(input.newString, ending)
                 const replacements = countOccurrences(source.text, oldString)
                 if (replacements === 0) {
-                  return yield* new ToolFailure({
-                    message:
-                      "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
-                  })
+                  const message =
+                    "Could not find oldString in the file. It must match exactly, including whitespace and indentation."
+                  const hint = EditHint.nearestRegion(source.text, oldString)
+                  return yield* new ToolFailure({ message: hint ? `${message}\n${hint}` : message })
                 }
                 if (replacements > 1 && input.replaceAll !== true) {
                   return yield* new ToolFailure({

@@ -303,8 +303,8 @@ describe("EditTool", () => {
                 expect(
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "same", newString: "same" })),
                 ).toEqual({
-                  type: "error",
-                  value: "No changes to apply: oldString and newString are identical.",
+                  type: "text",
+                  value: "No changes: oldString and newString are identical.",
                 })
                 expect(
                   yield* executeTool(registry, call({ path: "matches.txt", oldString: "", newString: "after" })),
@@ -330,6 +330,47 @@ describe("EditTool", () => {
               }),
             ),
           ),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("never creates a missing file for empty identical old and new", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        const target = path.join(tmp.path, "absent-empty.txt")
+        return withTool(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            const result = yield* executeTool(registry, call({ path: "absent-empty.txt", oldString: "", newString: "" }))
+            expect(result.type).toBe("error")
+            expect(writes).toEqual([])
+            expect(yield* Effect.promise(() => fs.stat(target).then(() => true, () => false))).toBe(false)
+          }),
+        )
+      },
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("reports not-found, not success, for identical old and new on a missing file", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => {
+        reset()
+        return withTool(tmp.path, (registry) =>
+          Effect.gen(function* () {
+            expect(
+              yield* executeTool(registry, call({ path: "absent.txt", oldString: "same", newString: "same" })),
+            ).toEqual({
+              type: "error",
+              value:
+                "Could not find oldString in the file. It must match exactly, including whitespace and indentation.",
+            })
+            expect(writes).toEqual([])
+          }),
         )
       },
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),

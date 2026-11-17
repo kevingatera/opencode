@@ -184,27 +184,54 @@ describe("tool.edit", () => {
       }),
     )
 
-    it.instance("throws error when oldString equals newString", () =>
+    it.instance("succeeds without changing the file when oldString equals newString", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "file.txt")
         yield* put(filepath, "content")
 
-        expect((yield* fail({ filePath: filepath, oldString: "same", newString: "same" })).message).toContain(
-          "identical",
-        )
+        const result = yield* run({ filePath: filepath, oldString: "same", newString: "same" })
+
+        expect(result.output).toBe("No changes: oldString and newString are identical.")
+        expect(yield* load(filepath)).toBe("content")
       }),
     )
 
-    it.instance("throws error when oldString not found in file", () =>
+    it.instance("empty identical old and new on a missing file errors and does not create the file", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "absent-empty.txt")
+
+        const error = yield* fail({ filePath: filepath, oldString: "", newString: "" })
+
+        expect(error.message).toContain("not found")
+        expect(yield* Effect.promise(() => fs.stat(filepath).then(() => true, () => false))).toBe(false)
+      }),
+    )
+
+    it.instance("identical old and new on a missing file reports not-found, not success", () =>
+      Effect.gen(function* () {
+        const test = yield* TestInstance
+        const filepath = path.join(test.directory, "absent.txt")
+
+        const error = yield* fail({ filePath: filepath, oldString: "same", newString: "same" })
+
+        expect(error.message).toContain("not found")
+      }),
+    )
+
+    it.instance("not-found error includes the nearby actual text with line numbers", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "file.txt")
-        yield* put(filepath, "actual content")
+        yield* put(filepath, "alpha\nactual content here\ngamma\n")
 
-        expect(yield* fail({ filePath: filepath, oldString: "not in file", newString: "replacement" })).toBeInstanceOf(
-          Error,
-        )
+        const error = yield* fail({ filePath: filepath, oldString: "actual contnt here", newString: "replacement" })
+
+        expect(error.message).toContain("Could not find oldString")
+        expect(error.message).toContain("Closest match (lines 2-2):")
+        expect(error.message).toContain("2: actual content here")
+        expect(error.message.length).toBeLessThan(1600)
       }),
     )
 
@@ -301,13 +328,16 @@ describe("tool.edit", () => {
       }),
     )
 
-    it.instance("throws error when oldString equals newString", () =>
+    it.instance("succeeds without changing the file when oldString and newString are both empty", () =>
       Effect.gen(function* () {
         const test = yield* TestInstance
         const filepath = path.join(test.directory, "file.txt")
         yield* put(filepath, "content")
 
-        expect((yield* fail({ filePath: filepath, oldString: "", newString: "" })).message).toContain("identical")
+        const result = yield* run({ filePath: filepath, oldString: "", newString: "" })
+
+        expect(result.output).toBe("No changes: oldString and newString are identical.")
+        expect(yield* load(filepath)).toBe("content")
       }),
     )
 

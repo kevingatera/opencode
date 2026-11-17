@@ -62,6 +62,42 @@ describe("Ripgrep", () => {
       (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
     ),
   )
+  it.live("skips a >100 KB line and still returns the normal matching line", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          yield* Effect.promise(() =>
+            fs.writeFile(path.join(tmp.path, "minified.js"), `needle${"x".repeat(100 * 1024)}\nneedle normal\n`),
+          )
+
+          const matches = yield* (yield* Ripgrep.Service).grep({
+            cwd: tmp.path,
+            pattern: "needle",
+            limit: 10,
+          })
+
+          expect(matches.map((item) => item.text)).toContain("needle normal\n")
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
+  it.live("treats a missing search directory as having no files", () =>
+    Effect.acquireUseRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) =>
+        Effect.gen(function* () {
+          const ripgrep = yield* Ripgrep.Service
+          const missing = path.join(tmp.path, "deleted-skill")
+
+          expect(yield* ripgrep.find({ cwd: missing, pattern: "!**/SKILL.md", limit: 10, hidden: true })).toEqual([])
+          expect(yield* ripgrep.grep({ cwd: missing, pattern: "needle", limit: 10 })).toEqual([])
+        }),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ),
+  )
+
   it.live("does not split surrogate pairs in oversized line previews", () =>
     Effect.acquireUseRelease(
       Effect.promise(() => tmpdir()),

@@ -82,8 +82,10 @@ const layer = Layer.effectDiscard(
                   source: { type: "tool", messageID: context.assistantMessageID, callID: context.toolCallID },
                 })
                 const directory = path.dirname(skill.location)
+                // The skill directory may have been deleted since discovery; load it without a file list.
+                const present = yield* fs.existsSafe(directory)
                 const files =
-                  path.basename(skill.location) === "SKILL.md"
+                  present && path.basename(skill.location) === "SKILL.md"
                     ? (yield* fs.glob("**/*", { cwd: directory, absolute: true, include: "file", dot: true }))
                         .filter((file) => path.basename(file) !== "SKILL.md")
                         .toSorted()

@@ -17,6 +17,7 @@ import { InstanceState } from "@/effect/instance-state"
 import { Snapshot } from "@/snapshot"
 import { assertExternalDirectoryEffect } from "./external-directory"
 import { FSUtil } from "@opencode-ai/core/fs-util"
+import { EditHint } from "@opencode-ai/core/tool/edit-hint"
 import * as Bom from "@/util/bom"
 
 function normalizeLineEndings(text: string): string {
@@ -72,15 +73,26 @@ export const EditTool = Tool.define(
             throw new Error("filePath is required")
           }
 
-          if (params.oldString === params.newString) {
-            throw new Error("No changes to apply: oldString and newString are identical.")
-          }
-
           const instance = yield* InstanceState.context
           const filePath = path.isAbsolute(params.filePath)
             ? params.filePath
             : path.join(instance.directory, params.filePath)
           yield* assertExternalDirectoryEffect(ctx, filePath)
+
+          // Identical strings never mutate the filesystem. A no-op succeeds only when the file exists;
+          // otherwise it is reported as not found, so an empty oldString cannot create the file.
+          if (params.oldString === params.newString) {
+            if (!(yield* afs.existsSafe(filePath))) throw new Error(`File ${filePath} not found`)
+            return {
+              metadata: {
+                diagnostics: {},
+                diff: "",
+                filediff: { file: filePath, patch: "", additions: 0, deletions: 0 },
+              },
+              title: path.relative(instance.worktree, filePath),
+              output: "No changes: oldString and newString are identical.",
+            }
+          }
 
           let diff = ""
           let contentOld = ""
@@ -721,9 +733,10 @@ export function replace(content: string, oldString: string, newString: string, r
   }
 
   if (notFound) {
-    throw new Error(
-      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings.",
-    )
+    const message =
+      "Could not find oldString in the file. It must match exactly, including whitespace, indentation, and line endings."
+    const hint = EditHint.nearestRegion(content, oldString)
+    throw new Error(hint ? `${message}\n${hint}` : message)
   }
   throw new Error("Found multiple matches for oldString. Provide more surrounding context to make the match unique.")
 }

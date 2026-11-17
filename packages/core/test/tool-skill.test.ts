@@ -146,4 +146,62 @@ describe("SkillTool", () => {
       ),
     ),
   )
+
+  it.live("loads a skill whose directory was deleted after discovery without throwing", () =>
+    Effect.acquireRelease(
+      Effect.promise(() => tmpdir()),
+      (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
+    ).pipe(
+      Effect.flatMap((tmp) =>
+        Effect.gen(function* () {
+          const directory = path.join(tmp.path, "gone")
+          const info: SkillV2.Info = {
+            name: "gone",
+            description: "Deleted skill",
+            location: AbsolutePath.make(path.join(directory, "SKILL.md")),
+            content: "# Gone",
+          }
+          const permission = Layer.succeed(
+            PermissionV2.Service,
+            PermissionV2.Service.of({
+              assert: () => Effect.void,
+              ask: () => Effect.die("unused"),
+              reply: () => Effect.die("unused"),
+              get: () => Effect.die("unused"),
+              forSession: () => Effect.die("unused"),
+              list: () => Effect.die("unused"),
+            }),
+          )
+          const skills = Layer.succeed(
+            SkillV2.Service,
+            SkillV2.Service.of({
+              transform: (_transform) => Effect.die("unused"),
+              reload: () => Effect.die("unused"),
+              sources: () => Effect.die("unused"),
+              list: () => Effect.succeed([info]),
+            }),
+          )
+          const skillToolLayer = AppNodeBuilder.build(
+            LayerNode.group([ToolRegistry.node, ToolRegistry.toolsNode, SkillTool.node]),
+            [
+              [PermissionV2.node, permission],
+              [SkillV2.node, skills],
+              [ToolOutputStore.node, ToolOutputStore.nodeWithoutConfig],
+            ],
+          )
+
+          return yield* Effect.gen(function* () {
+            const registry = yield* ToolRegistry.Service
+            expect(
+              yield* executeTool(registry, {
+                sessionID,
+                ...toolIdentity,
+                call: { type: "tool-call", id: "call-gone-skill", name: "skill", input: { name: "gone" } },
+              }),
+            ).toEqual({ type: "text", value: SkillTool.toModelOutput(info, []) })
+          }).pipe(Effect.provide(skillToolLayer))
+        }),
+      ),
+    ),
+  )
 })

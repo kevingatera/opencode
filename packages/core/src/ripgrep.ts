@@ -7,6 +7,7 @@ import { makeGlobalNode } from "./effect/app-node"
 import { AppProcess, collectStream, waitForAbort } from "./process"
 import { NonNegativeInt, PositiveInt, RelativePath } from "./schema"
 import { RipgrepBinary } from "./ripgrep/binary"
+import { FSUtil } from "./fs-util"
 
 /**
  * Small core-owned ripgrep execution adapter. It deliberately exposes raw
@@ -94,6 +95,7 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const process = yield* AppProcess.Service
     const binary = yield* RipgrepBinary.Service
+    const fs = yield* FSUtil.Service
 
     const run = <A>(input: {
       readonly cwd: string
@@ -106,6 +108,9 @@ const layer = Layer.effect(
     }) => {
       const program = Effect.scoped(
         Effect.gen(function* () {
+          // A search root that no longer exists (for example a deleted skill directory) has no
+          // files. Treat it as an empty result rather than a ripgrep failure.
+          if (!(yield* fs.existsSafe(input.cwd))) return { items: [], truncated: false, partial: false }
           const handle = yield* process.spawn(
             ChildProcess.make(yield* binary.filepath, input.args, { cwd: input.cwd, extendEnv: true, stdin: "ignore" }),
           )
@@ -114,9 +119,16 @@ const layer = Layer.effect(
             Effect.forkScoped,
           )
           let observed = 0
+          let skipped = 0
           const rows = yield* Stream.decodeText(handle.stdout).pipe(
             Stream.splitLines,
             Stream.filter((line) => line.length > 0),
+            Stream.filter((line) => {
+              // An oversized record (minified or generated file) is skipped, not fatal.
+              if (Buffer.byteLength(line, "utf8") <= MAX_RECORD_BYTES) return true
+              skipped++
+              return false
+            }),
             Stream.mapEffect(input.parse),
             Stream.filter((row): row is A => row !== undefined),
             Stream.tap((row) => {
@@ -127,6 +139,7 @@ const layer = Layer.effect(
             Stream.runCollect,
             Effect.map((chunk) => [...chunk]),
           )
+          if (skipped > 0) yield* Effect.logWarning("ripgrep skipped oversized records", { skipped, cwd: input.cwd })
           const truncated = rows.length > input.limit
           if (truncated) return { items: rows.slice(0, input.limit), truncated, partial: false }
 
@@ -230,13 +243,10 @@ const layer = Layer.effect(
             input.file ?? ".",
           ],
           parse: (line) =>
-            (Buffer.byteLength(line, "utf8") > MAX_RECORD_BYTES
-              ? Effect.fail(failure(`Ripgrep JSON record exceeded ${MAX_RECORD_BYTES} bytes`))
-              : Effect.try({
-                  try: () => JSON.parse(line) as unknown,
-                  catch: (cause) => failure("Invalid ripgrep JSON output", cause),
-                })
-            ).pipe(
+            Effect.try({
+              try: () => JSON.parse(line) as unknown,
+              catch: (cause) => failure("Invalid ripgrep JSON output", cause),
+            }).pipe(
               Effect.flatMap((json) => {
                 if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
                   return Effect.succeed(undefined)
@@ -281,4 +291,8 @@ const layer = Layer.effect(
   }),
 )
 
-export const node = makeGlobalNode({ service: Service, layer: layer, deps: [RipgrepBinary.node, AppProcess.node] })
+export const node = makeGlobalNode({
+  service: Service,
+  layer: layer,
+  deps: [RipgrepBinary.node, AppProcess.node, FSUtil.node],
+})

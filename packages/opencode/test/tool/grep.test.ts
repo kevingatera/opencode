@@ -4,7 +4,7 @@ import fs from "fs/promises"
 import os from "os"
 import path from "path"
 import { LayerNode } from "@opencode-ai/core/effect/layer-node"
-import { Effect, Layer } from "effect"
+import { Cause, Effect, Exit, Layer } from "effect"
 import { GrepTool } from "../../src/tool/grep"
 import { provideInstance, testInstanceStoreLayer, TestInstance, tmpdirScoped } from "../fixture/fixture"
 import { SessionID, MessageID } from "../../src/session/schema"
@@ -153,6 +153,21 @@ describe("tool.grep", () => {
       expect(result.metadata.truncated).toBe(true)
       expect(result.output).toContain("Found 100+ matches")
       expect(result.output).toContain("Results truncated: showing 100 matches")
+    }),
+  )
+
+  it.instance("fails early with a clear message when path does not exist", () =>
+    Effect.gen(function* () {
+      const test = yield* TestInstance
+      const missing = path.join(test.directory, "does-not-exist")
+      const info = yield* GrepTool
+      const grep = yield* info.init()
+      const exit = yield* grep.execute({ pattern: "needle", path: missing }, ctx).pipe(Effect.exit)
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause)
+        expect(error instanceof Error ? error.message : String(error)).toContain(`Path does not exist: ${missing}`)
+      }
     }),
   )
 

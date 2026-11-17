@@ -54,6 +54,7 @@ export const GrepTool = Tool.define(
             ? (params.path ?? ins.directory)
             : path.join(ins.directory, params.path ?? ".")
           const requestedInfo = yield* fs.stat(requested).pipe(Effect.catch(() => Effect.succeed(undefined)))
+          if (!requestedInfo) throw new Error(`Path does not exist: ${requested}`)
           yield* assertExternalDirectoryEffect(ctx, requested, {
             bypass: false,
             kind: requestedInfo?.type === "Directory" ? "directory" : "file",
