@@ -14,6 +14,7 @@ import { Config } from "@/config/config"
 import { RuntimeFlags } from "@/effect/runtime-flags"
 import { Shell } from "@opencode-ai/core/shell"
 import { ShellID } from "./shell/id"
+import { CommandFamily } from "./shell/command-family"
 
 import * as Truncate from "./truncate"
 import { Plugin } from "@/plugin"
@@ -26,6 +27,8 @@ import { BashSearch } from "@opencode-ai/core/tool/bash-search"
 export { Parameters } from "./shell/prompt"
 
 const MAX_METADATA_LENGTH = 30_000
+// Inline cap for commands whose output is a file or history dump. The full output is still spilled to a file.
+const DUMP_INLINE_BYTES = 16 * 1024
 const INTERACTIVE_PROMPT_IDLE_MS = 2_000
 const CWD = new Set(["cd", "chdir", "popd", "pushd", "push-location", "set-location"])
 const FILES = new Set([
@@ -228,7 +231,8 @@ function preview(text: string) {
   return "...\n\n" + text.slice(-MAX_METADATA_LENGTH)
 }
 
-function tail(text: string, maxLines: number, maxBytes: number) {
+// Keeps the last lines/bytes ("tail") or the first ("head"). Head is for dumps that read top-down.
+function clip(text: string, maxLines: number, maxBytes: number, mode: "head" | "tail") {
   const lines = text.split("\n")
   if (lines.length <= maxLines && Buffer.byteLength(text, "utf-8") <= maxBytes) {
     return {
@@ -236,6 +240,8 @@ function tail(text: string, maxLines: number, maxBytes: number) {
       cut: false,
     }
   }
+
+  if (mode === "head") return { text: headText(lines, maxLines, maxBytes), cut: true }
 
   const out: string[] = []
   let bytes = 0
@@ -258,6 +264,28 @@ function tail(text: string, maxLines: number, maxBytes: number) {
     text: out.join("\n"),
     cut: true,
   }
+}
+
+// Dump output: `head` is the stream prefix (at least maxBytes long once full, or the whole output
+// when short). `total` is the full byte count, so cut reflects the real output, not the prefix.
+function clipHead(head: string, total: number, maxLines: number, maxBytes: number) {
+  if (total <= maxBytes && head.split("\n").length <= maxLines) return { text: head, cut: false }
+  return { text: headText(head.split("\n"), maxLines, maxBytes), cut: true }
+}
+
+function headText(lines: string[], maxLines: number, maxBytes: number) {
+  const out: string[] = []
+  let bytes = 0
+  for (let i = 0; i < lines.length && out.length < maxLines; i++) {
+    const size = Buffer.byteLength(lines[i], "utf-8") + (out.length > 0 ? 1 : 0)
+    if (bytes + size > maxBytes) {
+      if (out.length === 0) out.push(Buffer.from(lines[i], "utf-8").subarray(0, maxBytes).toString("utf-8"))
+      break
+    }
+    out.push(lines[i])
+    bytes += size
+  }
+  return out.join("\n")
 }
 
 const parse = Effect.fn("ShellTool.parse")(function* (command: string, ps: boolean) {
@@ -439,15 +467,23 @@ export const ShellTool = Tool.define(
         env: NodeJS.ProcessEnv
         timeout: number
         description?: string
+        family: CommandFamily.Family
       },
       ctx: Tool.Context,
     ) {
       const limits = yield* trunc.limits()
+      const dump = input.family === "dump"
+      const inlineBytes = dump ? Math.min(limits.maxBytes, DUMP_INLINE_BYTES) : limits.maxBytes
       const keep = limits.maxBytes * 2
       let full = ""
       let last = ""
       const list: Chunk[] = []
       let used = 0
+      // Dump commands read top-down, so they need the real prefix. The rolling tail above has
+      // already dropped early chunks by the time output is large, so keep a separate bounded prefix.
+      let head = ""
+      let headFull = false
+      let total = 0
       let file = ""
       let sink: ReturnType<typeof createWriteStream> | undefined
       let cut = false
@@ -520,6 +556,11 @@ export const ShellTool = Tool.define(
         const size = Buffer.byteLength(chunk, "utf-8")
         list.push({ text: chunk, size })
         used += size
+        total += size
+        if (dump && !headFull) {
+          head += chunk
+          if (Buffer.byteLength(head, "utf-8") >= inlineBytes) headFull = true
+        }
         while (used > keep && list.length > 1) {
           const item = list.shift()
           if (!item) break
@@ -633,7 +674,7 @@ export const ShellTool = Tool.define(
         )
       }
       const raw = list.map((item) => item.text).join("")
-      const end = tail(raw, limits.maxLines, limits.maxBytes)
+      const end = dump ? clipHead(head, total, limits.maxLines, inlineBytes) : clip(raw, limits.maxLines, inlineBytes, "tail")
       if (end.cut) cut = true
       if (!file && end.cut) {
         file = yield* trunc.write(raw)
@@ -642,7 +683,9 @@ export const ShellTool = Tool.define(
       let output = end.text
       if (!output) output = "(no output)"
 
-      if (cut && file) {
+      if (cut && file && dump) {
+        output = output + `\n\n...output truncated at end...\n\nFull output saved to: ${file}`
+      } else if (cut && file) {
         output = `...output truncated...\n\nFull output saved to: ${file}\n\n` + output
       }
 
@@ -710,6 +753,7 @@ export const ShellTool = Tool.define(
                   env: yield* shellEnv(ctx, cwd),
                   timeout,
                   description: params.description,
+                  family: CommandFamily.classify(params.command),
                 },
                 ctx,
               )

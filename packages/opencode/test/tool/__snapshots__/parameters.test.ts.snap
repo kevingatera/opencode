@@ -24,6 +24,10 @@ exports[`tool parameters JSON Schema (wire shape) bash 1`] = `
       "description": "The command to execute",
       "type": "string",
     },
+    "description": {
+      "description": "Optional short label for this command, echoed in shell metadata",
+      "type": "string",
+    },
     "timeout": {
       "description": "Optional timeout in milliseconds",
       "exclusiveMinimum": 0,
@@ -262,7 +266,7 @@ exports[`tool parameters JSON Schema (wire shape) read 1`] = `
       "type": "string",
     },
     "limit": {
-      "description": "The maximum number of lines to read (defaults to 2000)",
+      "description": "The maximum number of lines to read (defaults to 400)",
       "maximum": 9007199254740991,
       "minimum": 0,
       "type": "integer",
@@ -301,6 +305,10 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "allow_same_model_review": {
+      "description": "Force a separation-role review to run on the writer model. Only applies to model_routing.separation_roles (default review*). The acknowledgement is logged and prepended to the Task result text; prefer a different reviewer model or a per-call model override.",
+      "type": "boolean",
+    },
     "background": {
       "description": "Run the agent in the background. You will be notified when it completes. DO NOT sleep, poll, or proactively check on its progress",
       "type": "boolean",
@@ -311,6 +319,14 @@ exports[`tool parameters JSON Schema (wire shape) task 1`] = `
     },
     "description": {
       "description": "A short (3-5 words) description of the task",
+      "type": "string",
+    },
+    "directory": {
+      "description": "Optional working directory for this subagent. Relative paths resolve from the parent session directory. When this differs from other running subagents of the same parent, they are treated as isolated trees (no shared-directory destructive-shell denies).",
+      "type": "string",
+    },
+    "model": {
+      "description": "Optional per-call model override as "provider/model" for this Task execution. Use the models tool to discover exact IDs; do not guess. Wins over configured role candidates but still enforces model_routing policy (same-scope anchor provider, enabled/disabled providers, catalog availability, resumed child provider pin) and fails without substituting; reviewer-separation roles preview and check the actual override. Resuming with task_id+model switches an idle subagent to that model; omitting model keeps the current one. When the user requests a different model for an existing task, pass task_id and the exact model together on the first resume.",
       "type": "string",
     },
     "prompt": {

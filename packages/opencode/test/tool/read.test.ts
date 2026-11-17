@@ -337,7 +337,7 @@ describe("tool.read truncation", () => {
 
       const fs = yield* FSUtil.Service
       const counter = { bytes: 0 }
-      const result = yield* run({ filePath: filepath }).pipe(
+      const result = yield* run({ filePath: filepath, limit: 2000 }).pipe(
         Effect.provideService(
           FSUtil.Service,
           FSUtil.Service.of({
@@ -393,6 +393,33 @@ describe("tool.read truncation", () => {
         totalLines: 1,
         truncated: false,
       })
+    }),
+  )
+
+  it.live("defaults to 400 lines and tells the model how to continue", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const lines = Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n")
+      yield* put(path.join(dir, "thousand.txt"), lines)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "thousand.txt") })
+      expect(result.metadata.truncated).toBe(true)
+      expect(result.output).toContain("400: line400")
+      expect(result.output).not.toContain("401: line401")
+      expect(result.output).toContain("(Showing lines 1-400 of 1000. Use offset=401 to continue.)")
+    }),
+  )
+
+  it.live("explicit limit above the default returns all requested lines", () =>
+    Effect.gen(function* () {
+      const dir = yield* tmpdirScoped()
+      const lines = Array.from({ length: 1000 }, (_, i) => `line${i + 1}`).join("\n")
+      yield* put(path.join(dir, "thousand.txt"), lines)
+
+      const result = yield* exec(dir, { filePath: path.join(dir, "thousand.txt"), limit: 1000 })
+      expect(result.metadata.truncated).toBe(false)
+      expect(result.output).toContain("1000: line1000")
+      expect(result.output).toContain("End of file - total 1000 lines")
     }),
   )
 

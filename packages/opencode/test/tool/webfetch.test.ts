@@ -98,6 +98,46 @@ describe("tool.webfetch", () => {
     ),
   )
 
+  it.instance("truncates returned content over 12K chars with a notice and saved path", () =>
+    withFetch(
+      () =>
+        new Response("a".repeat(20_000), {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        }),
+      (url) =>
+        Effect.gen(function* () {
+          const result = yield* exec({ url: new URL("/long.txt", url).toString(), format: "text" })
+          expect(result.metadata.truncated).toBe(true)
+          expect(result.output).toContain("...[truncated: 8000 more chars]")
+          expect(result.output).toContain("Full content saved to:")
+          expect(result.output.length).toBeLessThan(12_500)
+        }),
+    ),
+  )
+
+  it.instance("does not split a surrogate pair at the 12K inline boundary", () =>
+    withFetch(
+      () =>
+        // 11,999 ASCII chars then an emoji: an emoji is 2 UTF-16 units, so a UTF-16 slice(0, 12000) would cut it.
+        new Response("a".repeat(11_999) + "😀" + "b".repeat(100), {
+          status: 200,
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        }),
+      (url) =>
+        Effect.gen(function* () {
+          const result = yield* exec({ url: new URL("/emoji.txt", url).toString(), format: "text" })
+          expect(result.output).toContain("😀")
+          expect(result.output).not.toContain("\uFFFD")
+          expect(result.output).toContain("...[truncated: 100 more chars]")
+        }),
+    ),
+  )
+
+  // Not covered: a failing spill write (saved content lost, inline head still returned with the
+  // "could not be saved" notice). The truncation dir is fixed at import time from the shared test
+  // XDG_DATA_HOME, so forcing one write to fail would need a mock. Exercise it manually if needed.
+
   it.instance("extracts text from html without scripts or styles", () =>
     withFetch(
       () =>

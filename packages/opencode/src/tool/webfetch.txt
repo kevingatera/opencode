@@ -10,4 +10,4 @@ Usage notes:
   - HTTP URLs will be automatically upgraded to HTTPS
   - Format options: "markdown" (default), "text", or "html"
   - This tool is read-only and does not modify any files
-  - Results may be summarized if the content is very large
+  - Returned content is capped at 12,000 characters. Longer content is cut, and the notice gives the character count removed and the path of the saved full content

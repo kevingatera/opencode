@@ -1,12 +1,16 @@
-import { Effect, Schema } from "effect"
+import { Effect, Exit, Schema } from "effect"
 import { HttpClient, HttpClientRequest } from "effect/unstable/http"
 import { Parser } from "htmlparser2"
 import * as Tool from "./tool"
 import TurndownService from "turndown"
 import DESCRIPTION from "./webfetch.txt"
+import { Truncate } from "./truncate"
 import { isImageAttachment } from "@/util/media"
 
 const MAX_RESPONSE_SIZE = 5 * 1024 * 1024 // 5MB
+// Inline cap for returned page text. The full body is spilled to a file that the notice names.
+const MAX_INLINE_CHARS = 12_000
+type WebFetchMetadata = { truncated?: boolean; outputPath?: string }
 const DEFAULT_TIMEOUT = 30 * 1000 // 30 seconds
 const MAX_TIMEOUT = 120 * 1000 // 2 minutes
 
@@ -26,6 +30,7 @@ export const WebFetchTool = Tool.define(
   Effect.gen(function* () {
     const http = yield* HttpClient.HttpClient
     const httpOk = HttpClient.filterStatusOk(http)
+    const trunc = yield* Truncate.Service
 
     return {
       description: DESCRIPTION,
@@ -112,7 +117,7 @@ export const WebFetchTool = Tool.define(
             return {
               title,
               output: "Image fetched successfully",
-              metadata: {},
+              metadata: {} as WebFetchMetadata,
               attachments: [
                 {
                   type: "file" as const,
@@ -123,37 +128,38 @@ export const WebFetchTool = Tool.define(
             }
           }
 
-          const content = new TextDecoder().decode(arrayBuffer)
+          const output = convertContent(new TextDecoder().decode(arrayBuffer), contentType, params.format)
+          // Leave metadata.truncated unset when inline: Tool.define then still applies its generic line/byte cap.
+          const chars = Array.from(output)
+          if (chars.length <= MAX_INLINE_CHARS) return { output, title, metadata: {} as WebFetchMetadata }
 
-          // Handle content based on requested format and actual content type
-          switch (params.format) {
-            case "markdown":
-              if (contentType.includes("text/html")) {
-                const markdown = convertHTMLToMarkdown(content)
-                return {
-                  output: markdown,
-                  title,
-                  metadata: {},
-                }
-              }
-              return { output: content, title, metadata: {} }
-
-            case "text":
-              if (contentType.includes("text/html")) {
-                return { output: extractTextFromHTML(content), title, metadata: {} }
-              }
-              return { output: content, title, metadata: {} }
-
-            case "html":
-              return { output: content, title, metadata: {} }
-
-            default:
-              return { output: content, title, metadata: {} }
+          const head = chars.slice(0, MAX_INLINE_CHARS).join("")
+          const more = chars.length - MAX_INLINE_CHARS
+          // A failed spill must not fail the fetch: the head is still useful, so say the rest is lost.
+          const saved = yield* Effect.exit(trunc.write(output))
+          if (!Exit.isSuccess(saved))
+            return {
+              output: `${head}\n\n...[truncated: ${more} more chars; full content could not be saved]`,
+              title,
+              metadata: { truncated: true } satisfies WebFetchMetadata,
+            }
+          return {
+            output: `${head}\n\n...[truncated: ${more} more chars]. Full content saved to: ${saved.value}`,
+            title,
+            metadata: { truncated: true, outputPath: saved.value } satisfies WebFetchMetadata,
           }
         }).pipe(Effect.orDie),
     }
   }),
 )
+
+function convertContent(content: string, contentType: string, format: "text" | "markdown" | "html") {
+  // Convert according to the requested format and the response's actual content type.
+  if (!contentType.includes("text/html")) return content
+  if (format === "markdown") return convertHTMLToMarkdown(content)
+  if (format === "text") return extractTextFromHTML(content)
+  return content
+}
 
 function extractTextFromHTML(html: string) {
   let text = ""

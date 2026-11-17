@@ -1302,6 +1302,100 @@ describe("tool.shell truncation", () => {
     }),
   )
 
+  it.live("cat keeps the head of a large file and names the saved full output", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const file = path.join(tmp, "big.txt")
+      const rows = Array.from({ length: 800 }, (_, i) => `row ${i} ${"x".repeat(60)}`).join("\n")
+      yield* Effect.promise(() => Bun.write(file, rows))
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const result = yield* run({ command: `cat ${file}` })
+          const spill = (result.metadata as { outputPath?: string }).outputPath
+          expect(spill).toBeTruthy()
+          expect(result.output).toContain("row 0 ")
+          expect(result.output).not.toContain("row 799 ")
+          expect(result.output).toContain("output truncated at end")
+          expect(result.output).toContain(`Full output saved to: ${spill}`)
+          expect(Buffer.byteLength(result.output, "utf-8")).toBeLessThan(18 * 1024)
+        }),
+      )
+    }),
+  )
+
+  it.live("cat keeps the real first row when output is much larger than the tail buffer", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const file = path.join(tmp, "numbered.txt")
+      // 10,000 rows, >200 KB: far beyond the 2 * maxBytes rolling tail, so early chunks were dropped.
+      const rows = Array.from({ length: 10_000 }, (_, i) => `row ${i}`).join("\n")
+      yield* Effect.promise(() => Bun.write(file, rows))
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          const result = yield* run({ command: `cat ${file}` })
+          const spill = (result.metadata as { outputPath?: string }).outputPath ?? ""
+          expect(spill).not.toBe("")
+          expect(result.output.split("\n")[0]).toBe("row 0")
+          expect(result.output).toContain("output truncated at end")
+          const saved = yield* Effect.promise(() => Bun.file(spill).text())
+          expect(saved.split("\n").at(-1)).toBe("row 9999")
+        }),
+      )
+    }),
+  )
+
+  it.live("git log keeps HEAD (first line) when its output is over 16 KB", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped({ git: true })
+      const subject = "HEAD_COMMIT_MARKER"
+      const body = "x".repeat(400)
+      yield* runIn(
+        tmp,
+        Effect.gen(function* () {
+          // Many commits so `git log` output is well past the 16 KB inline cap; HEAD is the last one made.
+          const script = Array.from(
+            { length: 100 },
+            (_, i) => `git -c user.name=t -c user.email=t@t commit --allow-empty -q -m "commit ${i} ${body}"`,
+          )
+            .concat(`git -c user.name=t -c user.email=t@t commit --allow-empty -q -m "${subject}"`)
+            .join(" && ")
+          yield* Effect.promise(() => Bun.$`sh -c ${script}`.cwd(tmp).quiet())
+
+          const result = yield* run({ command: `git log --format=%s` })
+          expect(result.output.split("\n")[0]).toBe(subject)
+          expect(result.output).toContain("output truncated at end")
+          expect((result.metadata as { outputPath?: string }).outputPath).toBeTruthy()
+        }),
+      )
+    }),
+  )
+
+  it.live("keeps the tail of test-runner output when it is truncated", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const code = `console.log("FIRST_LINE_MARKER"); for (let i = 0; i < 3000; i++) console.log("row " + i); console.log("LAST_SUMMARY_LINE")`
+        const result = yield* run({ command: `${bin} -e ${evalarg(code)}` })
+        expect(result.output).toContain("LAST_SUMMARY_LINE")
+        expect(result.output).not.toContain("FIRST_LINE_MARKER")
+        expect(result.output).toContain("...output truncated...")
+      }),
+    ),
+  )
+
+  it.live("ordinary commands keep the 50 KB inline cap", () =>
+    runIn(
+      projectRoot,
+      Effect.gen(function* () {
+        const result = yield* run({ command: fill("bytes", Truncate.MAX_BYTES + 10_000) })
+        mustTruncate(result)
+        expect(Buffer.byteLength(result.output, "utf-8")).toBeGreaterThan(30 * 1024)
+      }),
+    ),
+  )
+
   it.live("full output is saved to file when truncated", () =>
     runIn(
       projectRoot,
