@@ -7,6 +7,7 @@ import os from "os"
 import { PermissionV1 } from "@opencode-ai/core/v1/permission"
 import { EventV2Bridge } from "@/event-v2-bridge"
 import { PermissionSaved } from "@opencode-ai/core/permission/saved"
+import { isSiblingDenial, SIBLING_DENIAL_HINT, siblingSedDenial } from "./sibling"
 
 export const Event = PermissionV1.Event
 
@@ -27,10 +28,15 @@ interface State {
 }
 
 export function evaluate(permission: string, pattern: string, ...rulesets: PermissionV1.Ruleset[]): PermissionV1.Rule {
+  const rules = rulesets.flat()
+  const matched = rules.findLastIndex(
+    (rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern),
+  )
+  // Deny-only step for sibling subagents. Rules match the real command text alone,
+  // except that a later sibling marker also denies `sed` that may edit in place.
   return (
-    rulesets
-      .flat()
-      .findLast((rule) => Wildcard.match(permission, rule.permission) && Wildcard.match(pattern, rule.pattern)) ?? {
+    siblingSedDenial(permission, pattern, rules, matched) ??
+    rules[matched] ?? {
       action: "ask",
       permission,
       pattern: "*",
@@ -80,9 +86,12 @@ const layer = Layer.effect(
       let needsAsk = false
 
       for (const pattern of request.patterns) {
-        if (evaluate(request.permission, pattern, ruleset).action === "deny") {
+        const denied = evaluate(request.permission, pattern, ruleset)
+        if (denied.action === "deny") {
           return yield* new PermissionV1.DeniedError({
             ruleset: ruleset.filter((rule) => Wildcard.match(request.permission, rule.permission)),
+            rule: denied,
+            hint: isSiblingDenial(denied, ruleset) ? SIBLING_DENIAL_HINT : undefined,
           })
         }
         const rule = evaluate(request.permission, pattern, ruleset, remembered, approved)

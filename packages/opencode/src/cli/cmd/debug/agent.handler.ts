@@ -10,6 +10,7 @@ import type { MessageV2 } from "../../../session/message-v2"
 import { MessageID, PartID } from "../../../session/schema"
 import { ToolRegistry } from "@/tool/registry"
 import { Permission } from "../../../permission"
+import { isSiblingDenial, SIBLING_DENIAL_HINT } from "../../../permission/sibling"
 import { iife } from "../../../util/iife"
 import { fail } from "../../effect-cmd"
 import { InstanceRef } from "@/effect/instance-ref"
@@ -184,7 +185,11 @@ const createToolContext = Effect.fn("Cli.debug.agent.createToolContext")(functio
         for (const pattern of req.patterns) {
           const rule = Permission.evaluate(req.permission, pattern, ruleset)
           if (rule.action === "deny") {
-            throw new PermissionV1.DeniedError({ ruleset })
+            throw new PermissionV1.DeniedError({
+              ruleset,
+              rule,
+              hint: isSiblingDenial(rule, ruleset) ? SIBLING_DENIAL_HINT : undefined,
+            })
           }
         }
       })
