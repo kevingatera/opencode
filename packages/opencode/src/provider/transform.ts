@@ -16,6 +16,9 @@ function mimeToModality(mime: string): Modality | undefined {
 }
 
 export const OUTPUT_TOKEN_MAX = 32_000
+// Reasoning tokens count against the output limit, so a 32k cap can be spent on
+// thinking alone and end the turn with finish "length" and no answer.
+export const REASONING_OUTPUT_TOKEN_MAX = 64_000
 
 // OpenAI Responses `include` value that returns the encrypted reasoning state
 // needed for stateless multi-turn reasoning (store: false). Hoisted so every
@@ -1556,8 +1559,15 @@ export function providerOptions(model: Provider.Model, options: { [x: string]: a
   return { [key]: normalized }
 }
 
-export function maxOutputTokens(model: Provider.Model, outputTokenMax = OUTPUT_TOKEN_MAX): number {
-  return Math.min(model.limit.output, outputTokenMax) || outputTokenMax
+export function maxOutputTokens(model: Provider.Model, outputTokenMax?: number): number {
+  // A model with no declared output limit keeps the conservative default.
+  const fallback = outputTokenMax ?? OUTPUT_TOKEN_MAX
+  return (
+    Math.min(
+      model.limit.output,
+      outputTokenMax ?? (model.capabilities.reasoning ? REASONING_OUTPUT_TOKEN_MAX : OUTPUT_TOKEN_MAX),
+    ) || fallback
+  )
 }
 
 type JsonRecord = Record<string, unknown>
