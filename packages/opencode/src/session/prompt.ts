@@ -1619,6 +1619,7 @@ const layer = Layer.effect(
             ]
             const format = lastUser.format ?? { type: "text" as const }
             if (format.type === "json_schema") system.push(STRUCTURED_OUTPUT_SYSTEM_PROMPT)
+            const taskSessions = tools["task"] ? SessionTools.recentTaskSessions(msgs) : undefined
             const result = yield* handle.process({
               user: lastUser,
               agent,
@@ -1628,6 +1629,9 @@ const layer = Layer.effect(
               system,
               messages: [
                 ...modelMsgs,
+                ...(taskSessions
+                  ? [{ role: "user" as const, content: `<system-reminder>\n${taskSessions}\n</system-reminder>` }]
+                  : []),
                 ...(isLastStep ? [{ role: "assistant" as const, content: MAX_STEPS_PROMPT }] : []),
               ],
               tools,

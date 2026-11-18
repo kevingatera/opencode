@@ -40,7 +40,10 @@ const SUPPORTED_MCP_RESOURCE_ATTACHMENT_MIMES = new Set([
   "image/webp",
 ])
 
-const recentTaskSessions = (messages: SessionV1.WithParts[]) => {
+// Sent as a trailing reminder message, not in the task tool description: tool
+// definitions open the prompt-cache prefix, so text that changes whenever a
+// subagent starts or finishes would rewrite the whole cache.
+export const recentTaskSessions = (messages: SessionV1.WithParts[]) => {
   const seen = new Set<string>()
   const tasks = messages
     .toReversed()
@@ -183,12 +186,8 @@ export const resolve = Effect.fn("SessionTools.resolve")(function* (input: {
     permission: input.session.permission,
   })) {
     const schema = ProviderTransform.schema(input.model, ToolJsonSchema.fromTool(item))
-    const description =
-      item.id === "task"
-        ? [item.description, recentTaskSessions(input.messages)].filter(Boolean).join("\n\n")
-        : item.description
     tools[item.id] = tool({
-      description,
+      description: item.description,
       inputSchema: jsonSchema(schema),
       execute(args, options) {
         return run.promise(
