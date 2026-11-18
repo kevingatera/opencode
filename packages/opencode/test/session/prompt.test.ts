@@ -1393,6 +1393,8 @@ it.instance("subagent follow-up prompts do not inject routing reminder text", ()
     expect(inputs).toContain(`task_id: ${child.id}`)
     expect(inputs).toContain("Recent task sessions available for task_id follow-ups")
     expect(inputs).toContain("prefer Task(task_id=..., prompt=...) over spawning a fresh session")
+    // The list rides in a trailing message so the tool definitions stay byte-stable for prompt caching.
+    expect(JSON.stringify((yield* llm.inputs).map((input) => input.tools))).not.toContain("Recent task sessions")
     expect(inputs).not.toContain("subagent-follow-up-routing")
     expect(inputs).not.toContain("Before any other tool call, call the task tool")
     expect(inputs).not.toContain("your next assistant action must be task tool call")
