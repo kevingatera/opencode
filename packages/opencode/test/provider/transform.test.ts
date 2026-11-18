@@ -305,6 +305,33 @@ describe("ProviderTransform.options - setCacheKey", () => {
   })
 })
 
+describe("ProviderTransform.maxOutputTokens", () => {
+  const createModel = (reasoning: boolean, output: number) => ({ capabilities: { reasoning }, limit: { output } }) as any
+
+  test("caps non-reasoning models at the default", () => {
+    expect(ProviderTransform.maxOutputTokens(createModel(false, 128_000))).toBe(32_000)
+  })
+
+  test("gives reasoning models room for thinking plus an answer", () => {
+    expect(ProviderTransform.maxOutputTokens(createModel(true, 128_000))).toBe(64_000)
+    expect(ProviderTransform.maxOutputTokens(createModel(true, 40_000))).toBe(40_000)
+  })
+
+  test("never exceeds the declared output limit", () => {
+    expect(ProviderTransform.maxOutputTokens(createModel(true, 8_192))).toBe(8_192)
+  })
+
+  test("keeps the default when the output limit is unknown", () => {
+    expect(ProviderTransform.maxOutputTokens(createModel(true, 0))).toBe(32_000)
+  })
+
+  test("an explicit cap wins for every model", () => {
+    expect(ProviderTransform.maxOutputTokens(createModel(true, 128_000), 16_000)).toBe(16_000)
+    expect(ProviderTransform.maxOutputTokens(createModel(false, 128_000), 100_000)).toBe(100_000)
+    expect(ProviderTransform.maxOutputTokens(createModel(true, 0), 100_000)).toBe(100_000)
+  })
+})
+
 describe("ProviderTransform.options - zai/zhipuai thinking", () => {
   const sessionID = "test-session-123"
 
